@@ -1,0 +1,33 @@
+#mygrid{
+    height: 83%;
+    width: 60%;
+    display: grid;
+    grid-template-columns: repeat(3,1fr);
+    grid-template-rows: repeat((3,1fr));
+    font-family: sans-serif;
+    position: absolute;
+    top: 15%;
+    margin-left: 20%;
+
+}
+.grid-elem{
+    /* border: 2px solid red; */
+    border-radius: 15px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    color: black;
+    text-decoration: none;
+    width: 50%;
+    height: 50%;
+    padding-top: 20px;
+
+}
+.grid-elem:hover{
+    background-color: rgb(0, 0, 0);
+    background-color: rgb(0, 0, 0,0.4);
+}
+.icons{
+    font-size: 30px;
+}

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Currency Exchnage</title>
+    <link rel="stylesheet" href="/Unit Converter/currency/currency.css">
+</head>
+
+<body>
+    <h1 id="title">Currency Exchange ToolKit</h1>
+<h3 id="warning"></h3>
+    <div id="currencyBox">
+        <form name="form2" >
+
+            <div class="coverter">
+                <label for="oamount" id="label1">From</label>
+                <select class="select" id="select1">
+                    <option value="usd" class="dropdowwnlist">US Doller</option>
+                    <option value="INR" class="dropdowwnlist">Indian Rupee</option>
+                    <option value="taka" class="dropdowwnlist">Bangladeshi Taka</option>
+                    <option value="ruble" class="dropdowwnlist">Russian Rubel</option>
+                    <option value="pound" class="dropdowwnlist"> British Pound</option>
+                    <option value="dinar" class="dropdowwnlist"> Kuwatiti Dinar</option>
+                    <option value="EUR" class="dropdowwnlist">Euro</option>
+                    <option value="JPY" class="dropdowwnlist">Japanese Yen</option>
+                    <option value="AUD" class="dropdowwnlist">Australian Dollar</option>
+                    <option value="CAD" class="dropdowwnlist">Canadian Dollar</option>
+
+
+
+                </select>
+                <input type="text" class="inputvalue" id="inputvalue" autocomplete="off" placeholder="Enter the Amount" name="currency1" value="" >
+            </div>
+            <div class="coverter">
+                <label for="oamount" id="label2">To</label>
+                <select class="select" id="select2">
+                    <option value="usd" class="dropdowwnlist2">US Doller</option>
+                    <option value="INR" class="dropdowwnlist2">Indian Rupee</option>
+                    <option value="taka" class="dropdowwnlist2">Bangladeshi Taka</option>
+                    <option value="ruble" class="dropdowwnlist2">Russian Rubel</option>
+                    <option value="pound" class="dropdowwnlist2">British Pound</option>
+                    <option value="dinar" class="dropdowwnlist2">Kuwatiti Dinar</option>
+                    <option value="EUR" class="dropdowwnlist">Euro</option>
+                    <option value="JPY" class="dropdowwnlist">Japanese Yen</option>
+                    <option value="AUD" class="dropdowwnlist">Australian Dollar</option>
+                    <option value="CAD" class="dropdowwnlist">Canadian Dollar</option>
+
+                </select>
+                <!-- <input type="text" class="inputvalue" id="inputvalue2" name="currency2" value="" > -->
+
+            </div>
+            <button type="button" id="btn" onclick="myfun()">Check</button>
+        </form>
+        <label id="fnllabel">Converted Amount :-</label>
+        <h4 id="final"></h4>
+    </div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <script src="/Unit Converter/currency/currency.js"></script>
+</body>
+
+</html>

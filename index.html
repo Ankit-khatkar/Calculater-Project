@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" name="referrer">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calculater Project</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.2.0/css/all.min.css">
+
+</head>
+
+<body>
+    <div id="bg-img"></div>
+
+    <div id="calculater">
+        <a href="/Unit Converter/unitconverter.html"><button id="menu" ><i class="fa-solid fa-bars"></i></button></a>
+
+
+        <form name="form1">
+            <input type="text" id="calculateNum" name="answer" value="">
+
+            <div id="container">
+                <input type="button" value="C" class="items uique-btn" onclick="myfun()">
+
+                <input type="button" value="+" class="items uique-btn" onclick="form1.answer.value+='+'">
+
+                <input type="button" value="-" class="items uique-btn" onclick="form1.answer.value+='-'">
+
+                <div class="items calcu-icon"><i class="fa-solid fa-calculator"></i></div>
+
+                <input type="button" value="1" class="items num" onclick="form1.answer.value+='1'">
+
+                <input type="button" value='2' class="items num" onclick="form1.answer.value+='2'">
+
+                <input type="button" value="3" class="items num" onclick="form1.answer.value+='3'">
+
+                <input type="button" value='*' class="items uique-btn" onclick="form1.answer.value+='*'">
+
+                <input type="button" value="4" class="items num" onclick="form1.answer.value+='4'">
+
+                <input type="button" value="5" class="items num" onclick="form1.answer.value+='5'">
+
+                <input type="button" value="6" class="items num" onclick="form1.answer.value+='6'">
+
+                <input type="button" value='/' class="items uique-btn" onclick="form1.answer.value+='/'">
+
+                <input type="button" value="7" class="items num" onclick="form1.answer.value+='7'">
+
+                <input type="button" value="8" class="items num" onclick="form1.answer.value+='8'">
+
+                <input type="button" value="9" class="items num" onclick="form1.answer.value+='9'">
+
+                <input type="button" value='%' class="items uique-btn" onclick="form1.answer.value+='%'">
+
+                <input type="button" value="0" class="items num" onclick="form1.answer.value+='0'">
+
+                <input type="button" value=. class="items num" onclick="form1.answer.value+='.'">
+
+                <button type="button" class="items" onclick="myfun2()" ><i class="fa-solid fa-delete-left"></i></button>
+
+                <input type="button" value="=" class="items uique-btn" id="clcu" onclick="form1.answer.value=eval(form1.answer.value)">
+
+            </div>
+
+        </form>
+
+
+
+    </div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <script src="script.js"></script>
+</body>
+
+</html>
