@@ -6,15 +6,44 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Area Converter</title>
     <link rel="stylesheet" href="/Unit Converter/area/area.css">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 </head>
 <body>
+    <div id="container">
+    <div id="converterbox">
+        <label for="convertfrom" class="label" id="label1">Convert From:</label>
+        <select name="convertfrom" id="select1" class="select">
+            <option class="options" value="">Square Meter(m<sub>2</sub>)</option>
+            <option class="options" value="">Square Centimeter(m<sub>2</sub>)</option>
+            <option class="options" value="">Square Mile(m<sub>2</sub>)</option>
+            <option class="options" value="">Hactar(ha)</option>
+            <option class="options" value="">Square Yard(m<sub>2</sub>)</option>
+            <option class="options" value="">Square Foot(m<sub>2</sub>)</option>
+            <option class="options" value="">Acre(ac)</option>
+            <option class="options" value="">Square Inch(m<sub>2</sub>)</option>
+        </select>
 
 
+        <label for="convertfrom" class="label" id="label2">Convert To:</label>
+        <select name="convertto" id="select2" class="select">
+            <option class="options" value="">Square Meter(m<sub>2</sub>)</option>
+            <option class="options" value="">Square Centimeter(m<sub>2</sub>)</option>
+            <option class="options" value="">Square Mile(m<sub>2</sub>)</option>
+            <option class="options" value="">Hactar(ha)</option>
+            <option class="options" value="">Square Yard(m<sub>2</sub>)</option>
+            <option class="options" value="">Square Foot(m<sub>2</sub>)</option>
+            <option class="options" value="">Acre(ac)</option>
+            <option class="options" value="">Square Inch(m<sub>2</sub>)</option>
+        </select>
 
 
+        <label for="convertfrom" class="label" id="label3">Value:</label>
+        <input type="number" id="value" placeholder="Value">
 
-
-
+        <button id="btn">Convert</button>
+    </div>
+    <div id="output">Hello</div>
+</div>
 
 
 

@@ -1,0 +1,80 @@
+body{
+    font-family: 'Open Sans', sans-serif;
+}
+#container{
+    /* border: 2px solid red; */
+    display: flex;
+    justify-content:center ;
+    align-items: center;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+}
+#converterbox{
+    border: 2px solid rgb(48, 53, 48);
+    border-radius: 8px;
+    height: 100%;
+    width: 50%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    margin-top: 50px;
+    margin-bottom: 50px;
+}
+.select{
+    height: 35px;
+    width: 200px;
+    /* border: 2px solid white; */
+    border-radius: 8px;
+
+}
+.options{
+    height: 35px;
+    width: 150px;
+    border-radius: 8px;
+    font-size: 1rem;
+}
+#value{
+    height: 40px;
+    width: 158px;
+    margin-left: -35px;
+    border-radius: 8px;
+    font-size: 2rem;
+}
+#value::placeholder{
+    font-size: 1.5rem;
+}
+#label1{
+    margin-left: -43px;
+    padding-top: 35px;
+    font-size: 1.5rem;
+}
+#label2{
+    margin-left: -71px;
+    padding-top: 35px;
+    font-size: 1.5rem;
+}
+#label3{
+    margin-left: -126px;
+    padding-top: 35px;
+    font-size: 1.5rem;
+}
+#btn{
+    font-size: 1.5rem;
+    /* padding-left: 29px; */
+    margin-left: 569px;
+    margin-top: 50px;
+    background-color: green;
+    border-radius: 5px;
+}
+#btn:hover{
+    box-shadow: 5px 5px 5px black;
+    cursor: pointer;
+}
+#output{
+    border: 2px solid #321c1c;
+    font-size: 2rem;
+    /* height: 40px; */
+    width: 300px;
+}
