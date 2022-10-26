@@ -50,7 +50,12 @@
     width: 90px;
 }
 #answer{
-    color: red;
+    color: green;
+    border: 2px solid beige;
+    width: 200px;
+    position: relative;
+    left: 30%;
+    /* display: none; */
 }
 #btn{
     

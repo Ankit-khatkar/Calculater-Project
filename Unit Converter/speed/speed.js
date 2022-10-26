@@ -8,6 +8,7 @@ let referce=document.getElementById('btn2');
 
 
 function speedcovert(){
+    // answer.style.display='block';
     if(from.value=='kph' && to.value=='kph'){
        return answer.innerHTML=1*input.value+' K/h';
     }else if(from.value=='kph' && to.value=='kms'){
@@ -21,4 +22,8 @@ function speedcovert(){
     }else if(from.value=='kph' && to.value=='cs'){
         return answer.innerHTML=27.77*input.value+' cm/s';
     }
+}
+
+function refercepage(){
+    window.location.reload();
 }
