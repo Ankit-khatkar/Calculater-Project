@@ -8,13 +8,30 @@
     <link rel="stylesheet" href="/Unit Converter/weight/weight.css">
 </head>
 <body>
-    <h1>Sorry for Inconvinians, We are workiong on this page.</h1>
-
-
-
-
-
-    
+    <header id="container">
+        <h1 id="title">Weight Convertor</h1>
+        <div id="values">
+            <div class="units input_tags">From</div>
+            <select name="from" id="from" class="units">
+                <option value="gram">Gram(g)</option>
+                <option value="tonne">Tonne(t)</option>
+                <option value="kilogram">Kilogram(kg)</option>
+                <option value="pound">Pound(lb)</option>
+                <option value="quintal">Quintal(q)</option>
+            </select>
+            <div class="units input_tags" >To</div>
+            <select name="to" id="to" class="units">
+                <option value="gram">Gram(g)</option>
+                <option value="tonne">Tonne(t)</option>
+                <option value="kilogram">Kilogram(kg)</option>
+                <option value="pound">Pound(lb)</option>
+                <option value="quintal">Quintal(q)</option>
+            </select>
+        </div>
+        <input type="number" placeholder="Value" id="input-value">
+        <div id="result">Converted Weight :- </div>
+        <button id="btn" onclick="convertFun()">Check</button>
+    </header>    
     <script src="/Unit Converter/weight/weight.js"></script>
 </body>
 </html>
