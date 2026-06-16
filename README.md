@@ -1,394 +1,289 @@
-# Customer Search — Feature Design & Implementation Doc
+# Privacy Policy — RedLotus Foods
 
-## 1. Context & Goal
+**Effective date:** [DD Month YYYY]
+**Last updated:** [DD Month YYYY]
 
-Customers open `/restaurants` and see a distance-sorted grid of nearby kitchens, but there is
-**no way to search**. To find a specific dish ("biryani", "paneer") a customer must open each
-restaurant's menu one at a time. In a food app people think in terms of *food*, not the names
-of local kitchens they don't know yet — so the most valuable missing capability is: *type what
-you want, and see which nearby kitchen makes it.*
+This Privacy Policy explains how RedLotus Foods ("RedLotus", "we", "us" or "our") collects, uses, shares, stores and protects your personal data when you use our website ([redlotusfoods.in](https://redlotusfoods.in)), our mobile application, and the related services we provide (together, the "Platform").
 
-**Goal:** add a search box on `/restaurants` that filters **restaurants** (name/cuisine) **and
-dishes** (name/description) in a single view, **strictly confined to the customer's delivery
-radius**, with a **veg / non-veg** toggle on dish results.
+RedLotus is a hyperlocal food-ordering and delivery platform that connects you with nearby restaurant partners. To run that service, we have to handle some of your personal data — your name, contact details, delivery location and order history, among other things. We take that responsibility seriously, and this policy is written to be clear about exactly what we do and why.
 
-### Scale & multi-city (the constraints that shape the design)
-- Production today: **~15 restaurants, ~300–400 dishes** (the repo's `supabase/seed.sql` 5
-  restaurants / 40 dishes is **local dummy data only**).
-- The business is **expanding to other cities**.
-- **Hard requirement:** restaurants and dishes from **other cities must never appear** in search
-  results, and — because the dish table will grow large across cities — the **dishes table must
-  never be fetched globally** to the browser.
-
-**How the design satisfies this:** search is bounded by the **same 4 km delivery radius**
-(`RADIUS_KM`) the grid already uses. Radius-from-GPS naturally isolates a customer to their own
-locality (a user in City A is never within 4 km of City B). Dishes are fetched **only for the
-restaurants already inside that radius** (`.in('restaurant_id', nearbyIds)`), so other cities'
-dishes are neither shown nor downloaded. Text + veg matching then runs in the browser over that
-small, radius-bounded set.
-
-This remains a **frontend-only** change: no DB migration, no RPC, no new route, no navbar change.
+Please read this policy together with the consent you give us when you create an account, place an order, or choose to receive communications from us. By using the Platform, you confirm that you have read and understood this policy.
 
 ---
 
-## 2. Locked decisions
+## 1. Who we are and how to reach us
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Search scope | Restaurants **+** dishes | Highest discovery value |
-| Placement | Inline on `/restaurants` (no new route) | Reuses GPS/radius flow; least infra |
-| Data strategy | **Nearby-scoped fetch + client-side match** | Dishes fetched only for in-radius restaurants; instant matching; no migration |
-| Search radius | **Same 4 km delivery radius** (`RADIUS_KM`) | Only orderable results; auto-excludes other cities |
-| Multi-city isolation | Radius-from-GPS + scoped dish fetch | Other cities never shown **or** fetched (dishes) |
-| Restaurant match fields | `name` + `cuisine_type` | Both customer-meaningful |
-| Dish match fields | `name` + `description` | Ingredient terms work (e.g. "aloo") |
-| Match algorithm | Token-AND substring, case-insensitive | Predictable; "paneer pizza" → "Paneer Makhani Pizza" |
-| Veg filter | **All / Veg / Non-veg** chips on dish results | Only dishes carry `is_veg` |
-| Dish tap | Open restaurant menu (`/restaurants/:id`) | Simplest; no `RestaurantMenu` change |
+The Platform is owned and operated by **[LEGAL ENTITY NAME]** (a **[sole proprietorship / private limited company / LLP]** registered in India), having its place of business at **[REGISTERED / BUSINESS ADDRESS, City, Rajasthan, PIN]**.
+
+For the purposes of the **Digital Personal Data Protection Act, 2023 ("DPDP Act")** and the **Digital Personal Data Protection Rules, 2025 ("DPDP Rules")**, RedLotus is the **Data Fiduciary** that decides why and how your personal data is processed. You — the individual whose data we process — are the **Data Principal**.
+
+If you have any questions, requests or complaints about your personal data, you can contact our Grievance Officer (details in **Section 17**) or write to us at **[privacy@redlotusfoods.in]**.
 
 ---
 
-## 3. Where this lives in the code
+## 2. Scope of this policy and the laws that apply
 
-Single host: **`src/pages/restaurants/RestaurantList.tsx`** (+ its CSS). It already owns the
-restaurants fetch, the GPS→cache→radius pipeline, the `visible` list (within-radius,
-distance-sorted), `EmptyState`, and the card markup. **The existing location/grid flow is left
-untouched** — search layers on top of `visible`, so restaurant results inherit radius +
-open/active gating for free, and the dish fetch is keyed off the same `visible` set.
+This policy applies to personal data we collect through:
 
-New pure module: **`src/lib/search.ts`** (+ `src/lib/search.test.ts`) — match logic only,
-no React, following the repo's "tested pure logic in `src/lib`" convention (`geo.ts`,
-`pricing.ts`, `eta.ts`).
+- our website and Progressive Web App (PWA) at redlotusfoods.in;
+- our Android application (distributed via the Google Play Store and as an installable app);
+- SMS, push notifications, WhatsApp messages and emails we send you; and
+- any other interaction you have with RedLotus in connection with the Platform.
 
----
+We process personal data in accordance with applicable Indian law, including:
 
-## 4. Data layer (`RestaurantList.tsx`)
+- the **Digital Personal Data Protection Act, 2023** and the **Digital Personal Data Protection Rules, 2025**; and
+- the **Information Technology Act, 2000** and the **Information Technology (Reasonable Security Practices and Procedures and Sensitive Personal Data or Information) Rules, 2011 ("SPDI Rules")**.
 
-### 4.1 What stays the same
-The existing mount effect that fetches restaurants and the geolocation pipeline are **unchanged**.
-`visible` (within-radius, distance-sorted `{ r, distance }[]`) remains the source of truth for the
-grid and for restaurant search results.
-
-> Note: the restaurants fetch is still global (then haversine-filtered client-side). Restaurants
-> are a small table relative to dishes (~1:25), so this is acceptable near-term; geo-scoping it
-> (bounding box) is listed as a future optimisation in §14.
-
-### 4.2 Dishes — fetched **scoped to the in-radius restaurants**, lazily
-```ts
-type DishRow = Pick<MenuItem, "id" | "restaurant_id" | "name" | "description" | "price" | "is_veg">;
-
-const [menuItems, setMenuItems] = useState<DishRow[]>([]);
-const [dishesStatus, setDishesStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
-const [searchFocused, setSearchFocused] = useState(false); // set true on first input focus
-const fetchedKeyRef = useRef<string>("");                   // visibleIds set we last fetched for
-```
-
-Stable key for the current nearby set:
-```ts
-const visibleIdsKey = useMemo(
-  () => visible.map((v) => v.r.id).sort().join(","),
-  [visible],
-);
-```
-
-Fetch effect — runs the first time the user engages search (focus **or** typing) and refetches
-only if the nearby set changed (e.g. the customer moved and a restaurant entered/left the radius):
-```ts
-useEffect(() => {
-  const engaged = searchFocused || normalize(query) !== "";
-  if (!engaged || visibleIdsKey === "") return;
-  if (visibleIdsKey === fetchedKeyRef.current) return; // already have this nearby set
-
-  const ids = visibleIdsKey.split(",");
-  let cancelled = false;
-  setDishesStatus("loading");
-  (async () => {
-    const { data, error: mErr } = await supabase
-      .from("menu_items")
-      .select("id, restaurant_id, name, description, price, is_veg")
-      .in("restaurant_id", ids);
-    if (cancelled) return;
-    if (mErr) {
-      setDishesStatus("error");           // NON-FATAL: restaurants stay searchable
-      return;
-    }
-    setMenuItems((data ?? []) as DishRow[]);
-    fetchedKeyRef.current = visibleIdsKey;
-    setDishesStatus("loaded");
-  })();
-  return () => { cancelled = true; };
-}, [searchFocused, query, visibleIdsKey]);
-```
-
-Rules & guarantees:
-- **Radius/city isolation:** the request carries `restaurant_id=in.(<nearby ids>)`, so only dishes
-  from restaurants already inside the 4 km radius are fetched. Other cities' dishes never leave the
-  DB. (RLS `menu_items_customer_select` additionally enforces `is_available` + visible restaurants.)
-- **Lazy:** browse-only sessions never fetch dishes. Prefetch on **focus** means dishes are
-  usually ready before the first keystroke completes.
-- **Bounded payload:** the result set is whatever is within 4 km (tens of restaurants → a few
-  hundred dish rows worst case), regardless of total catalogue size or number of cities.
-- **Non-fatal:** on error, dishes stay empty and `dishesStatus="error"`; restaurant search + grid
-  keep working.
-- `price` may arrive as a string (`numeric`) — coerce with `Number(...)` at format time.
-  `is_veg` is `boolean NOT NULL` — no null handling.
+This policy does **not** cover the practices of third parties we do not own or control, including our restaurant partners and the service providers listed in **Section 7.3**. Those parties handle your data under their own privacy policies.
 
 ---
 
-## 5. Search logic module — `src/lib/search.ts`
+## 3. Key terms used in this policy
 
-Pure functions, fully unit-tested.
-
-```ts
-/** lowercase, trim, collapse internal whitespace; null/undefined → "" */
-export function normalize(s: string | null | undefined): string {
-  return (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-/**
- * True iff EVERY whitespace-separated token of `query` is a substring of `haystack`.
- * Empty/whitespace query → false (callers treat empty query as "not searching").
- */
-export function matchesAllTokens(haystack: string, query: string): boolean {
-  const h = normalize(haystack);
-  const tokens = normalize(query).split(" ").filter(Boolean);
-  if (tokens.length === 0) return false;
-  return tokens.every((t) => h.includes(t));
-}
-
-export function restaurantMatches(
-  r: { name: string; cuisine_type: string | null },
-  query: string,
-): boolean {
-  return matchesAllTokens(`${r.name} ${r.cuisine_type ?? ""}`, query);
-}
-
-export function dishMatches(
-  d: { name: string; description: string | null },
-  query: string,
-): boolean {
-  return matchesAllTokens(`${d.name} ${d.description ?? ""}`, query);
-}
-```
-
-**Semantics & examples**
-- Case-insensitive: `"PANEER"` matches "Paneer Tikka".
-- Token-AND, non-contiguous: `"veg rice"` matches "Veg Fried Rice".
-- Single token = plain substring: `"bir"` matches "Chicken Biryani".
-- Description matching: `"chinese"` matches "Hot & Sour Soup" (desc "…Indo-Chinese soup…").
-- Out of scope: diacritic folding, fuzzy/typo tolerance, ranking.
+- **Personal data** — any data about an individual who can be identified by or in relation to that data (for example, your name, mobile number, email or delivery address).
+- **Sensitive personal data or information (SPDI)** — under the SPDI Rules, this includes financial information such as payment instrument details and passwords. We minimise our handling of SPDI wherever possible (see **Section 4.3**).
+- **Processing** — any operation performed on personal data, such as collecting, storing, using, sharing or deleting it.
+- **Data Fiduciary** — the entity (RedLotus) that determines the purpose and means of processing your personal data.
+- **Data Principal** — you, the individual the personal data relates to. Where the data relates to a child, "Data Principal" includes the child's parent or lawful guardian.
+- **Data Processor** — a third party that processes personal data on our behalf and on our instructions (for example, our hosting and payment providers).
 
 ---
 
-## 6. Component logic (`RestaurantList.tsx`)
+## 4. Information we collect
 
-### 6.1 Derived values (`useMemo`)
-```ts
-const searching = useMemo(() => normalize(query) !== "", [query]);
-const canSearch = !error && !locationError && visible.length > 0;
+We only collect data we actually need to run the Platform. The categories below describe what we collect and how.
 
-// id → { name, distance } for dish-row enrichment + a defensive radius guard.
-const restaurantById = useMemo(
-  () => new Map(visible.map((v) => [v.r.id, { name: v.r.name, distance: v.distance }])),
-  [visible],
-);
+### 4.1 Information you provide to us
 
-const restaurantResults = useMemo(
-  () => (searching ? visible.filter(({ r }) => restaurantMatches(r, query)) : []),
-  [searching, visible, query],
-);
+- **Account information** — your name, mobile number, email address and a password (stored only in encrypted/hashed form) when you register.
+- **Profile and delivery information** — your saved delivery addresses, landmarks, and any delivery instructions you add.
+- **Order information** — the items you order, special instructions, and your order history.
+- **Communications with us** — messages, feedback, ratings, reviews and support requests you send.
 
-// Dishes are already nearby-scoped by the fetch; the .has() guard drops any row whose
-// restaurant just left the radius before a refetch, and supplies name/distance.
-const dishCandidates = useMemo(() => {
-  if (!searching) return [];
-  return menuItems
-    .filter((d) => restaurantById.has(d.restaurant_id) && dishMatches(d, query))
-    .map((d) => {
-      const meta = restaurantById.get(d.restaurant_id)!;
-      return { dish: d, restaurantName: meta.name, distance: meta.distance };
-    })
-    .sort((a, b) => a.distance - b.distance || a.dish.name.localeCompare(b.dish.name));
-}, [searching, menuItems, restaurantById, query]);
+### 4.2 Order and transaction information
 
-const dishResults = useMemo(() => {
-  if (vegFilter === "all") return dishCandidates;
-  const wantVeg = vegFilter === "veg";
-  return dishCandidates.filter(({ dish }) => dish.is_veg === wantVeg);
-}, [dishCandidates, vegFilter]);
+When you place an order, we collect details of that order (items, amounts, applied discounts, the restaurant partner, delivery address, and order status) so we can process and deliver it and provide support.
 
-const dishesPending = searching && dishesStatus === "loading";
-const noTextMatches =
-  searching && !dishesPending && restaurantResults.length === 0 && dishCandidates.length === 0;
-```
+### 4.3 Payment information
 
-### 6.2 Render tree (inside `.rlist__container`)
-Order: `header` → **search bar** → `offer strip` → **results | grid | existing empty states**.
+Online payments on the Platform are processed by our payment gateway, **Razorpay**. When you pay online, your card, UPI or net-banking details are entered into Razorpay's secure, PCI-DSS-compliant systems — **RedLotus does not collect or store your full card number, CVV or banking credentials.** We receive only limited confirmation data such as a transaction reference, payment status and amount. If you choose **Cash on Delivery**, no online payment details are collected.
 
-- **Header:** unchanged; hide the "N nearby" count pill when `searching`.
-- **Search bar:** render when `canSearch`. Anatomy: leading `Search` lucide icon, text input
-  (`onFocus` → `setSearchFocused(true)`), trailing clear `X` (shown when `query !== ""`).
-- **Offer strip:** existing block + `&& !searching`.
-- **Body:**
-  - `!canSearch` → existing branches verbatim (skeleton, fetch error, location error,
-    `NO_RESTAURANTS_CONFIG`, `NONE_IN_RANGE_CONFIG`).
-  - `canSearch && !searching` → existing grid.
-  - `canSearch && searching` → **results view**:
-    - `restaurantResults.length > 0` → **Restaurants** section (title + count). Reuse the existing
-      card by extracting the current `<Link className="rlist__card">…` block into a local
-      `renderCard(entry, idx)` used by both grid and this section (keep `getCardImages`,
-      `RestaurantCardSlideshow`, distance badge, `animationDelay`/`staggerMs`).
-    - **Dishes** area:
-      - `dishesPending && dishCandidates.length === 0` → Dishes header + a small "Searching
-        dishes…" loader (so we never flash "no results" while the fetch is in flight).
-      - else if `dishCandidates.length > 0` → **Dishes** section: header row = title + count
-        (`dishResults`) + **veg chips** (`All`/`Veg`/`Non-veg`, bound to `vegFilter`); body =
-        dish rows (§7), or an inline `No {Veg|Non-veg} dishes match "{query}"` when the toggle
-        empties a non-empty list.
-      - else → nothing (omit Dishes section).
-    - `noTextMatches` → `EmptyState` with `noMatchConfig(query)` (replaces empty sections).
-    - `dishesStatus === "error"` (and no dishes) → optional subtle inline note "Couldn't load
-      dishes — restaurant results still shown."
+### 4.4 Location information
 
-### 6.3 Interactions
-- Clear `X` and **Escape** → `setQuery("")`.
-- No debounce (matching ~hundreds of rows is instant). No autofocus (don't pop the mobile keyboard).
+To show you restaurants that can actually deliver to you, we use location data:
+
+- **Precise location** — with your permission, we use your device's GPS location (collected through our in-app location feature) to find nearby restaurants and calculate delivery distance.
+- **Approximate location** — if you do not grant location access, we may estimate your approximate area from your IP address as a fallback.
+- **Delivery address** — the address you enter or select for an order.
+
+You can turn off device location permission at any time in your browser or device settings; if you do, you may need to enter your delivery area manually.
+
+### 4.5 Device, technical and usage information
+
+When you use the Platform we automatically collect certain technical data, including your device type and operating system, app version, IP address, browser type, and basic usage and diagnostic information (such as pages or screens viewed and errors encountered). This helps us keep the Platform secure, fix problems and improve performance.
+
+### 4.6 Communications data
+
+To send you order updates and (where you have opted in) offers, we process your mobile number and email address through our communication providers — for example, SMS and push notifications via **MSG91**, order and account updates via **WhatsApp**, and emails via **Brevo**. This includes the content and delivery status of those messages.
+
+### 4.7 Cookies and similar technologies
+
+Our website uses cookies and similar technologies to keep you signed in, remember your preferences, keep the Platform secure, and understand how it is used. See **Section 13** for more detail and how to control them.
 
 ---
 
-## 7. Dish row markup & styling
+## 5. How we use your information
 
-Each dish result is a full-row `<Link to={'/restaurants/' + d.restaurant_id}>`:
-```
-[veg dot]  Dish Name                         ₹Price
-           Restaurant Name · 0.4 km
-```
-- Veg dot: square FSSAI marker — green `#2ECC71` (veg) / red `#E74C3C` (non-veg), matching the
-  `rmenu__veg` treatment in `RestaurantMenu`. `aria-label="Vegetarian" | "Non-vegetarian"`.
-- Price: local `formatPrice(Number(d.price))` (mirror `RestaurantMenu.tsx`; integers → no decimals).
-- Distance: reuse existing `formatDistance(distance)`.
+We use your personal data for the following purposes:
 
----
-
-## 8. CSS additions (`RestaurantList.css`, `rlist__` prefix)
-
-Match existing tokens (brand `#D63031`, border `#E8E2DC`, warm bg):
-- `rlist__search`, `rlist__search-input`, `rlist__search-icon`, `rlist__search-clear`.
-- `rlist__results`, `rlist__section`, `rlist__section-head`, `rlist__section-title`,
-  `rlist__section-count`.
-- `rlist__vegfilter`, `rlist__vegchip`, `rlist__vegchip--active`.
-- `rlist__dishes`, `rlist__dish`, `rlist__dish-veg`, `rlist__dish-name`, `rlist__dish-price`,
-  `rlist__dish-sub`.
-- `rlist__results-empty` (veg-filtered note), `rlist__dishes-loading` (in-flight loader).
-
-Responsive: chips wrap under the title `<480px`; reuse `.rlist__grid` for the restaurant section.
-
-**Exact copy strings**
-- Input placeholder & `aria-label`: `Search food or restaurants`
-- Clear `aria-label`: `Clear search`
-- Section titles: `Restaurants`, `Dishes`
-- Veg chips: `All`, `Veg`, `Non-veg`
-- Dishes loader: `Searching dishes…`
-- No-match (`noMatchConfig(query)`): title `No results for "{query}"`; body
-  `Try a shorter or different word — a dish like "biryani" or a place like "Punjab". Still stuck? Chat with us.`;
-  `waMessage`: `Hi RedLotus, I searched for "{query}" but couldn't find it. Can you help me order?`
-  (build dynamically, same pattern as `FETCH_ERROR_CONFIG` spread + `body`).
-- Veg-filtered empty: `No {Veg|Non-veg} dishes match "{query}"`
+- **To provide the service** — creating and managing your account, showing you nearby restaurants, and processing, fulfilling and delivering your orders.
+- **To handle payments** — processing online payments through Razorpay and confirming Cash-on-Delivery orders.
+- **To communicate with you about your orders** — order confirmations, status updates, delivery alerts and OTPs, sent by SMS, push notification, WhatsApp or email.
+- **To provide customer support** — responding to your questions, complaints and requests.
+- **For marketing and offers** — sending you promotions, discounts and updates **only where you have given consent**, and always with an option to opt out.
+- **To keep the Platform safe** — detecting, preventing and investigating fraud, abuse, and security incidents.
+- **To improve the Platform** — analysing usage to fix bugs, improve features and understand what our users need.
+- **To meet legal obligations** — complying with applicable laws, tax and accounting requirements, and lawful requests from authorities.
 
 ---
 
-## 9. Edge cases & expected behavior
+## 6. Our lawful basis for processing
 
-| Situation | Behavior |
-|---|---|
-| Restaurant/dish in another city (outside radius) | Never fetched (dishes) / never shown (restaurants) — excluded by the 4 km gate |
-| Location resolving / errored / no GPS | No search bar (`canSearch` false); existing states unchanged |
-| `noneInRange` (located, 0 within 4 km) | No search bar; existing `NONE_IN_RANGE_CONFIG` |
-| User searches before dishes load | "Searching dishes…" loader; no premature "no results" |
-| Dish fetch fails | Dishes empty + optional inline note; restaurants + grid still work |
-| Customer moves, nearby set changes | `visibleIdsKey` changes → dishes refetched for the new set; stale rows dropped by `.has()` guard |
-| Query matches restaurants only / dishes only | Show only the relevant section |
-| Veg toggle empties a non-empty dish list | Keep Dishes header + chips + inline "No … dishes match" |
-| Same dish name at 2 restaurants | Two rows, disambiguated by the restaurant-name subline |
-| Whitespace-only query | `searching === false` → grid (not a no-match state) |
-| Open/close & availability changes mid-session | Not reflected until reload — same as today's grid (Realtime out of scope) |
+Under the DPDP Act we process your personal data on the following bases:
+
+- **Your consent** — which you give us when you create an account, place an order, enable location, or opt in to marketing. Your consent is sought through a clear request, is specific to the stated purpose, and can be withdrawn at any time (see **Section 11**).
+- **Certain legitimate uses permitted by the DPDP Act** — for example, where you have voluntarily provided data for a purpose and have not objected to its use for that purpose, or where processing is necessary to comply with law.
+
+Where consent is the basis, withdrawing it is as easy as giving it, and we will stop the relevant processing — though this will not affect anything already done lawfully before withdrawal, and may mean we can no longer provide part or all of the service.
 
 ---
 
-## 10. Testing
+## 7. How we share your information
 
-### 10.1 Unit — `src/lib/search.test.ts` (Vitest)
-Cover `normalize`, `matchesAllTokens`, `restaurantMatches`, `dishMatches`:
-- empty / whitespace-only query → `false`
-- case-insensitivity (`"PANEER"` vs "Paneer Tikka")
-- partial token (`"bir"` → "Chicken Biryani")
-- multi-token non-contiguous (`"veg rice"` → "Veg Fried Rice")
-- token-AND negative (`"paneer naan"` → "Paneer Tikka Masala" = false)
-- cuisine-only hit (`"chinese"` → Dragon House via `cuisine_type`)
-- description-only hit (`"chinese"` → "Hot & Sour Soup" via description)
-- `null` cuisine / `null` description don't throw and don't match
+We share your personal data only as described below. We do this to run the service or because the law requires it.
 
-### 10.2 Manual QA (`npm run dev`, customer login)
-> Local dev uses the **seed** dataset (`supabase/seed.sql`: 5 restaurants / 40 dishes, single
-> village) — production is larger, but behavior is identical. Seed restaurants sit at
-> ~`28.034, 75.789`, outside the `VILLAGE_CENTRE` override; use **Chrome DevTools → Sensors →
-> Location** set to ~`28.035, 75.789` so the 4 km filter yields results, then test.
+### 7.1 Restaurant partners
 
-- **Scoped fetch (the multi-city guarantee):** open the **Network** tab, focus the search box,
-  confirm the `menu_items` request URL contains `restaurant_id=in.(…)` listing only the nearby
-  restaurant ids — i.e. dishes are **not** fetched globally. (Optional: insert one far-away
-  restaurant + dish in a scratch DB and confirm it never appears and is never fetched.)
-- `paneer` → Restaurants 0 (hidden); Dishes 3: Paneer Tikka Masala (Punjab Dhaba), Chilli Paneer
-  (Dragon House), Paneer Makhani Pizza (Pizza Junction). All veg.
-- `paneer` + **Non-veg** → 0 → inline note; **Veg** → 3.
-- `punjab` → Restaurants 1 (Punjab Dhaba); Dishes hidden.
-- `biryani` → Dishes 1 (Chicken Biryani, Punjab Dhaba).
-- `chinese` → Restaurants 1 (Dragon House); Dishes 2 (Hot & Sour Soup, Chicken 65 — via desc).
-- `zzz` → no-match EmptyState. Clear (`X`/Esc) → grid returns; tap a dish → its restaurant menu.
+When you place an order, we share the details the restaurant needs to prepare it — typically your name, order items and special instructions, and (where relevant for self-delivery) your delivery address and contact number. Our current partners include Hunger Lane, Kaffe D Station, Famous Fast Food, Shree Vinayek and Gudha Delight, and others we onboard over time.
 
-### 10.3 Gates
-`npm test` (new + existing green) · `npm run lint` · `npm run build` (tsc clean).
+### 7.2 Delivery personnel
 
----
+We share your delivery address, contact number and order details with the delivery person assigned to your order so they can deliver it and contact you if needed.
 
-## 11. Performance
+### 7.3 Service providers (Data Processors)
 
-- Dish fetch is bounded by the 4 km radius (independent of total catalogue / city count).
-- Client-side matching over a few-hundred-row nearby set is sub-millisecond; all derived values
-  memoised. No debounce / virtualization needed.
-- Lazy fetch (on focus) means browse-only sessions cost zero extra queries.
+We use trusted third-party providers to operate the Platform. They process data on our behalf, under our instructions, and are expected to protect it. The main ones are:
+
+| Service provider | What they handle for us | Purpose | Their privacy policy |
+|---|---|---|---|
+| **Supabase** | Account, profile, order and related data; authentication; stored files | Database, login/authentication, file storage and backend functions | supabase.com/privacy |
+| **Vercel** | Technical and log data; serves the website/app | Hosting and content delivery | vercel.com/legal/privacy-policy |
+| **Razorpay** | Payment details you enter at checkout | Securely processing online payments | razorpay.com/privacy |
+| **MSG91** | Mobile number and message content | Sending SMS, OTPs and push notifications | msg91.com (Privacy Policy) |
+| **WhatsApp / Meta** | Mobile number and message content | Sending order and account updates on WhatsApp | whatsapp.com/legal |
+| **Brevo** | Name and email address | Sending transactional and (opted-in) marketing emails | brevo.com (Privacy Policy) |
+| **Google** | Business listing information | Google Business Profile and Maps presence | policies.google.com/privacy |
+
+We share only the data each provider needs for its specific purpose.
+
+### 7.4 Legal and regulatory disclosures
+
+We may disclose your personal data where we are required or permitted to do so by law — for example, to comply with a court order, a lawful request from a government authority or law-enforcement agency, or to protect the rights, safety and property of RedLotus, our users or the public.
+
+### 7.5 Business transfers
+
+If RedLotus is involved in a merger, acquisition, financing, reorganisation or sale of assets, your personal data may be transferred as part of that transaction. We will require the recipient to honour this policy, and we will notify you of any change in who controls your data.
+
+### 7.6 We do not sell your personal data
+
+RedLotus does **not** sell your personal data to third parties.
 
 ---
 
-## 12. Docs to update (structural change — keep mirrors in sync)
+## 8. Where your data is stored, and cross-border transfers
 
-- **New:** `src/docs/customer_search_plan.md` (this document).
-- **`CLAUDE.md`:**
-  - `/restaurants` routes-table row → note the inline search (restaurants + dishes, **nearby-scoped
-    dish fetch**, 4 km radius, client-side match, veg/non-veg toggle).
-  - `lib/` file map → add `search.ts  matchesAllTokens()/restaurantMatches()/dishMatches() — customer search filtering`.
-  - Testing scope line → add `src/lib/search.ts`.
-- **`GEMINI.md`:** mirror the same edits.
+Your personal data is stored and processed on servers operated by our providers, primarily **Supabase** (database, authentication and storage) and **Vercel** (hosting). Our data is hosted in **[confirm region — e.g., within India / Asia–Pacific region]**.
+
+Some of our service providers may store or process data on servers located outside India. Where this happens, such transfers are made in line with the DPDP Act, which permits the transfer of personal data outside India except to any country or territory that the Central Government may restrict. We take reasonable steps to ensure your data continues to be protected wherever it is processed.
 
 ---
 
-## 13. Files touched
+## 9. How we protect your data
 
-| Action | Path |
-|---|---|
-| New | `src/lib/search.ts`, `src/lib/search.test.ts`, `src/docs/customer_search_plan.md` |
-| Edit | `src/pages/restaurants/RestaurantList.tsx`, `src/pages/restaurants/RestaurantList.css` |
-| Edit | `CLAUDE.md`, `GEMINI.md` |
+We follow reasonable security practices and procedures designed to protect your personal data from unauthorised access, use, disclosure, alteration or loss, in line with the SPDI Rules and the DPDP Act. These include:
 
-No migration · no RPC · no new route · no navbar change · no `RestaurantMenu` change.
+- **Encryption in transit** (HTTPS/TLS) for data moving between your device and the Platform, and encryption of stored data where supported by our providers;
+- **Row-Level Security** and access controls in our database, so users and partners can only access the data they are authorised to;
+- **Authentication safeguards**, including hashed passwords and role-based access;
+- **Restricting access** to personal data to those who need it to provide the service; and
+- **Monitoring** for security issues and acting on them.
+
+No method of transmission or storage is completely secure, so while we work hard to protect your data, we cannot guarantee absolute security. Please keep your account password confidential.
 
 ---
 
-## 14. Out of scope (possible follow-ups)
+## 10. How long we keep your data
 
-- **Server-side search RPC** — only if a single 4 km radius ever holds many thousands of dishes.
-- **Geo-scope the restaurant fetch** (lat/lng bounding box) when cross-city restaurant counts grow
-  large; pairs naturally with the scoped dish fetch.
-- **Per-city / configurable radius** instead of the fixed 4 km `RADIUS_KM`.
-- Deep-link + scroll/highlight to the tapped dish; typo tolerance / synonyms; recent searches;
-  search analytics; live (Realtime) availability in results.
+We keep your personal data only for as long as it is needed for the purposes set out in this policy, or as required by law:
+
+- **Account and profile data** — for as long as your account is active, and for a reasonable period afterwards.
+- **Order and transaction records** — retained for the period required under applicable tax, accounting and other laws (generally up to **8 years**).
+- **Marketing data** — until you withdraw your consent or unsubscribe.
+- **Technical logs** — for a short period needed for security and troubleshooting.
+
+When data is no longer required and there is no legal reason to keep it, we will delete it or anonymise it. You may also ask us to erase your data — see **Section 11**.
+
+---
+
+## 11. Your rights as a Data Principal
+
+Under the DPDP Act, you have the following rights in relation to your personal data:
+
+- **Right to access** — to obtain a summary of the personal data we process about you and the processing activities we undertake.
+- **Right to correction and erasure** — to have inaccurate or incomplete data corrected or updated, and to have your personal data erased where it is no longer needed for the purpose it was collected (subject to our legal retention obligations).
+- **Right to grievance redressal** — to raise a complaint with us about how we handle your data (see **Section 17**).
+- **Right to nominate** — to nominate another individual to exercise your rights on your behalf in the event of your death or incapacity.
+- **Right to withdraw consent** — to withdraw consent you have given, at any time, as easily as you gave it.
+
+**How to exercise your rights:** you can manage much of your information directly in your account, or contact our Grievance Officer at **[grievance@redlotusfoods.in]** with your request. We may need to verify your identity before acting on a request. We will respond within the timelines required under applicable law.
+
+---
+
+## 12. Marketing communications and how to opt out
+
+We will only send you promotional messages where you have opted in. You can opt out at any time:
+
+- **SMS / push notifications** — reply or follow the opt-out instructions in the message, or turn off notifications in your device settings;
+- **WhatsApp** — reply with the opt-out keyword indicated, or block the number;
+- **Email** — click "unsubscribe" at the bottom of any marketing email.
+
+Even if you opt out of marketing, we will still send you **essential service messages** about your account and orders (such as order confirmations, delivery updates and OTPs), as these are necessary to provide the service.
+
+---
+
+## 13. Cookies and similar technologies
+
+Our website uses cookies and similar technologies to:
+
+- keep you signed in and remember your preferences (**essential cookies**);
+- keep the Platform secure; and
+- understand how the Platform is used so we can improve it (**analytics cookies**).
+
+You can control or delete cookies through your browser settings. Blocking essential cookies may affect how the Platform works.
+
+---
+
+## 14. Children's privacy
+
+The Platform is intended for users who are **18 years of age or older**. We do not knowingly collect or process the personal data of children (individuals under 18) without the verifiable consent of a parent or lawful guardian, as required by the DPDP Act.
+
+We do not use children's data for tracking, behavioural monitoring or targeted advertising. If you are a parent or guardian and believe a child has provided us with personal data without your consent, please contact our Grievance Officer and we will take steps to delete it.
+
+---
+
+## 15. Data breach notification
+
+If a personal data breach occurs, we will respond in line with the DPDP Act and DPDP Rules. This includes notifying the **Data Protection Board of India** and informing affected Data Principals **within 72 hours** (or such other period as the law allows), with a plain-language description of the breach, the data affected, the steps you can take to protect yourself, and how to contact us.
+
+---
+
+## 16. Third-party links
+
+The Platform may contain links to third-party websites, apps or services (for example, a restaurant's own page or a payment provider). We are not responsible for the privacy practices of those third parties, and we encourage you to read their privacy policies before sharing data with them.
+
+---
+
+## 17. Grievance redressal
+
+If you have any complaint or concern about how we handle your personal data, please contact our **Grievance Officer**:
+
+- **Name:** [GRIEVANCE OFFICER NAME]
+- **Email:** [grievance@redlotusfoods.in]
+- **Phone:** [GRIEVANCE OFFICER PHONE]
+- **Address:** [BUSINESS ADDRESS, City, Rajasthan, PIN]
+
+We will acknowledge your complaint promptly and work to resolve it within the timelines prescribed under applicable law. If you are not satisfied with our response, you may escalate your grievance to the **Data Protection Board of India** in the manner provided under the DPDP Act and DPDP Rules, and appeals from the Board lie to the **Telecom Disputes Settlement and Appellate Tribunal (TDSAT)**.
+
+---
+
+## 18. Changes to this policy
+
+We may update this policy from time to time to reflect changes in our practices or the law. When we make material changes, we will update the "Last updated" date above and, where appropriate, notify you through the Platform or by other means. Please review this policy periodically.
+
+---
+
+## 19. Governing law and jurisdiction
+
+This policy is governed by the laws of India. Subject to applicable law, the courts at **[JURISDICTION CITY, e.g., Jhunjhunu / Jaipur], Rajasthan** shall have jurisdiction over any disputes arising in connection with this policy.
+
+---
+
+## 20. Contact us
+
+For any questions about this Privacy Policy or your personal data, contact us at:
+
+**[LEGAL ENTITY NAME] (RedLotus Foods)**
+Email: **[privacy@redlotusfoods.in]**
+Website: [redlotusfoods.in](https://redlotusfoods.in)
+Address: [BUSINESS ADDRESS, City, Rajasthan, PIN]
