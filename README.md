@@ -127,11 +127,20 @@ Password: <fill at submission>
 (Phone verification is already completed on this account.)
 
 SEEING RESTAURANTS OUTSIDE THE SERVICE AREA
-The home screen is geofenced to a 4 km radius. If your test location is
+The home screen shows only restaurants that deliver to your current location
+(each restaurant has its own delivery radius). If your test location is
 outside our service area, the empty state shows a "Show restaurants anyway"
-button — tap it to browse the live Gudha Gorji catalogue and complete a
-test order (cash on delivery — no payment collected in-app; you can cancel
-the order right after placing it, or the restaurant declines it).
+button — tap it to browse the live Gudha Gorji catalogue, open any menu, and
+add items to the cart and reach checkout.
+
+DELIVERY IS SERVICE-AREA ONLY (intended geofence, not a bug)
+Each restaurant delivers only within a radius of its own location, so placing
+an order requires a delivery pin inside that restaurant's delivery area. From
+outside it, tapping "Use my current location" at checkout shows "this location
+is outside the delivery area for [restaurant name]" — this is the intended
+service-area restriction, not an error. The app is fully functional inside the
+service area; a real in-area customer sets their location and completes a
+cash-on-delivery order normally.
 
 NATIVE FEATURES (not a website wrapper)
 Push notifications for live order status (FCM), native geolocation with
