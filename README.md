@@ -5,7 +5,7 @@
 > **Revision:** v1 — 2026-09-25
 > **Depends on:** 002 (`handle_new_user`, `users` RLS), 005 (phone-verified guard trigger), 016 / 019 / 023 (column-grant doctrine), and the MSG91 account + Airtel-DLT OTP template that `send-otp` already uses (MSG91 template id `69f2350acf9869ba19066fc2`, header `RDLOTS` — `phone_verification_plan.md` §3.1).
 > **Supersedes:** customer sign-up and log-in in `phase1_customer_mvp_plan.md` (email + password, Google, `/profile?setup=true`) and the customer half of `phone_verification_plan.md` (`send-otp` / `verify-otp` retire in Phase 5). Takes "OTP-based login" off the v2-deferred list.
-> **Migrations:** `024_column_write_grants.sql` (security hotfix, ships first and on its own, §2) · `025_phone_otp_login.sql` (§4) · `026_phone_otp_cleanup.sql` (after the transition window, §10).
+> **Migrations:** `024_column_write_grants.sql` (security hotfix, ships first and on its own, §2) · `025_orders_write_grants.sql` (orders audit fix, §2.5) · `026_owner_self_review_guard.sql` (§2.7) · `027_phone_otp_login.sql` (§4) · `028_phone_otp_cleanup.sql` (after the transition window, §10).
 
 ## At a glance
 
@@ -25,7 +25,7 @@
 | **D2** | Google + email/password for customers | **Locked: removed.** | Existing customers reach their old account by typing their verified number (§7). This deletes email confirmation, forgot-password and the native Google browser trip. |
 | **D3** | What a new customer fills in after the OTP | **Locked: name only, required.** | `place_order` already refuses an empty name (022, step (a)). New customers give no email. |
 | **D4** | SMS auto-read | **Locked: not in v1.** | Reuses today's template. Auto-read needs a new DLT template and a store build (§13). |
-| **D5** | Ship the **024 security hotfix** now, on its own | **Recommend: this week, off-peak.** | Any signed-in customer can become admin today (§2). |
+| **D5** | Ship the **024 security hotfix** now, on its own | **✅ Shipped 2026-09-25, 16:25 IST** (PR #58). Verified on production (§2.6). | Any signed-in customer could become admin (§2). |
 | **D6** | Make restaurant menus public (remove the login wall on `/restaurants/:id`) | **Recommend: yes, in the same launch.** | CLAUDE.md and migration 016 already say logged-out visitors can browse menus. The route guard contradicts that: it sends visitors to login on their first restaurant tap (§8.1). |
 | **D7** | SMS limits | **Recommend:** 60 SMS/hour project-wide, 10 per number per 24 h, 20 per IP per hour, 30 s between resends. | Caps the cost of abuse at about ₹12/hour in the worst case (§9). The Supabase limits are Dashboard settings. The per-number and per-IP caps are Edge Function env vars. |
 | **D8** | Play reviewer login | **Recommend:** a SIM that RedLotus owns, registered in Supabase as a test number with a fixed OTP. | Reviewers can't receive our SMS. Putting a fixed code on someone else's real number would give that person's account to anyone who knows the code. |
@@ -128,7 +128,7 @@ Postgres lets a role be granted UPDATE on specific columns only. A table-level g
 
 -- users — Profile.tsx writes full_name, phone and phone_verified (to false
 -- only; the 005 trigger blocks true). phone / phone_verified drop out in
--- 026 once no installed bundle writes them (phone_otp_login_plan.md §10).
+-- 028 once no installed bundle writes them (phone_otp_login_plan.md §10).
 REVOKE UPDATE ON public.users FROM authenticated;
 GRANT  UPDATE (full_name, phone, phone_verified) ON public.users TO authenticated;
 
@@ -198,9 +198,113 @@ Then check that the app still works:
 
 **Rollback** means re-granting the table privilege, which reopens the hole. If a write breaks, the better fix is to add the missing column to the grant.
 
-### 2.5 Follow-up (not in 024)
+### 2.5 Orders audit (done 2026-09-25 → migration 025)
 
-`orders` very likely has the same shape. Owners should only need to write `status`, `decline_reason` and `eta_minutes`, but `orders_owner_update` plus the table-level grant lets them write any column of their restaurant's orders, including `total_amount`, the fee columns and `customer_phone`. Some of those columns are protected by snapshot triggers and some probably aren't. Check each trigger before narrowing the grant; this is its own small piece of work.
+The audit read the migrations and the production catalog: privileges, policies, triggers, and how each function on the order path runs. The fix is `025_orders_write_grants.sql`.
+
+**What production allowed before 025:**
+
+| | Finding |
+|---|---|
+| Privileges | `authenticated` held table-level INSERT / UPDATE / DELETE on `orders` and `order_items`. `anon` did too (the legacy default ACL; RLS blocked it). |
+| Policies | `orders_customer_insert` (own order, `phone_verified`) and `order_items_customer_insert` (own order) allowed **direct inserts**. `orders_owner_update` checks restaurant ownership only (no WITH CHECK, so USING is reused). |
+| Triggers | `check_order_placement` (INSERT: restaurant open), `check_order_item` (INSERT: dish `is_available`, nothing else), `check_status_transition` + `stamp_order_accept` (**UPDATE only**). |
+| Functions | `place_order`, `cancel_order` and `submit_order_review` run as **SECURITY DEFINER** (owner `postgres`). `recalculate_order_total` runs as **SECURITY INVOKER**. |
+
+**Hole 1: customers could create orders without `place_order`.** A direct INSERT skips every rule `place_order` enforces:
+
+- **Status:** any status, because the transition trigger only fires on UPDATE. An order could be *born* `completed`.
+- **Money:** any total, discount or fee. `recalculate_order_total` runs as the caller, and RLS gives customers no UPDATE on `orders`, so the total was never recomputed.
+- **Items:** any `unit_price`, and dishes from any restaurant.
+- **Delivery and bookkeeping:** no pin, no radius check, no `order_commissions` row, no config version.
+
+`submit_order_review` treats "own order + status `completed` + dish in `order_items`" as proof of purchase, and every part of that could be forged. So a phone-verified customer could post "verified" reviews for any restaurant or dish without ordering. The forged orders would also sit in the settlement views as completed orders.
+
+**Hole 2: owners could rewrite any column of their restaurant's orders.** Only `status`, `eta_minutes` and `accepted_at` were guarded. The worst case is review tampering:
+
+1. The owner sets `customer_id` to their own id.
+2. They call `submit_order_review`. Its `ON CONFLICT (order_id)` upsert replaces the existing review's rating and comment, but **keeps the real customer's name** on it.
+3. They set `customer_id` back.
+
+Owners could also change `total_amount` and the fee columns (what the rider collects and what settlement reads), the customer's name and phone, the delivery address and pin, `expires_at` and `created_at`.
+
+**The fix (025):**
+
+| | Change |
+|---|---|
+| Creating orders | No client role may INSERT into `orders` or `order_items`. Both customer INSERT policies are dropped too, so a stray re-grant can't reopen the path; RLS would still deny it. |
+| Owner edits | Owners may UPDATE only `status`, `eta_minutes` and `decline_reason`, exactly what `OwnerDashboard.tsx` sends for accept, progress and decline. |
+| `anon` | No write privilege on either table. |
+| Unaffected | `place_order`, `cancel_order` and `submit_order_review` (SECURITY DEFINER), and every service_role path (cron, `send-push`, `delete-account`, the Dashboard). |
+
+**Shipped 2026-09-25, 17:04 IST (PR #59).**
+
+- **Preview branch:** `025_verify` passed 10/10, and the end-to-end REST test passed 25/25:
+  - Still works: `place_order`, `cancel_order`, accept → preparing → out for delivery → completed, decline, and a review on the completed order.
+  - Refused at the grant layer: forged INSERTs, and 12 owner column rewrites.
+- **Production:** `db push` applied 025 only. `025_verify` now passes 10/10 (6 failed before); `024_verify` 11/11 and `023_verify` 14/14 still pass.
+- **Forensics on production** (read-only; 931 orders, 95 restaurant reviews, 155 dish reviews):
+  - **No forged orders.** Zero orders with a total that doesn't match their items, missing items, a missing commission row or config version, progress without an accept, a missing contact snapshot, or an extended expiry.
+  - **One order was reassigned:** `e1f45262-cf6e-49ae-b6d1-8bbd53b1cb79`, Marudhar Family Restaurant.
+    - Placed 20 Sep 17:18 IST by the account whose name and phone are on the order. That same account reviewed it 5★ (restaurant + 4 dishes) at 18:51 IST.
+    - It now belongs to a *different* customer account, created 16 minutes after the order was placed.
+    - The order row was last updated **21 Sep 12:23 IST**, after completion, which no app flow does.
+    - The review was **never edited** (`updated_at = created_at`).
+  - **Actor unknown:** either Marudhar's owner (a PATCH was possible before 025) or a Dashboard edit. The API gateway logs for that minute show which; retention is about 7 days.
+
+**Still possible after 025 (follow-ups, not holes in the permissions):**
+
+- **Owners completing orders themselves.** An owner can still move a real order to `completed` without a delivery: the status flow is theirs by design. Paired with a second account that places orders, that allows self-reviews. The control is reconciling completed orders against the riders' cash. **Review side done in 026 (§2.7).**
+- **Owners expiring orders by hand.** An owner can move `pending → expired` themselves (a transition the cron also uses), which avoids writing a decline reason.
+- **`anon` write grants on other tables.** `anon` still holds table-level write grants on `users`, `restaurants`, `menu_items`, `delivery_addresses`, `device_tokens`, `discount_config`, `promotions` and `menu_categories` (legacy defaults). RLS blocks every one today. Revoking them is hygiene only.
+
+### 2.6 Shipped — 2026-09-25
+
+- **Preview branch** (PR #58):
+  - `024_verify.sql` passed 11/11; `023_verify.sql` still passes 14/14.
+  - Signed in as the seed owner over the REST API, 17/17 checks passed:
+    - Profile save, the `is_open` toggle, and dish insert / edit / availability / image still work.
+    - Writes to `role` / `email` / `auth_provider`, `is_featured` / `delivery_radius_km` / `rating_avg` / `is_active`, dish ratings and dish re-parenting are all refused with `42501`.
+- **Production:**
+  - `db push` applied `024_column_write_grants.sql` at 16:25 IST. The dry run had shown it was the only pending migration.
+  - `024_verify.sql` now passes 11/11 (before the fix, 7 of the security checks failed).
+  - `023_verify.sql` still passes 14/14.
+- **Post-fix audit on production** (read-only, counts only):
+  - **0 admin accounts** in `public.users`, so nobody used the hole to become admin.
+  - **0 rating mismatches**: every stored `rating_avg` / `rating_count` equals the trigger's `COUNT` / `ROUND(AVG, 1)` across 18 restaurants and 1,290 dishes.
+  - **2 owner-role accounts with no restaurant.** These could be onboarding in progress, or customers who self-promoted to `owner` before the fix. `owner` without a restaurant only reaches `OnboardingIncomplete`. **To review.**
+  - 15/18 restaurants are featured and 16/18 have a non-default radius. The data can't show whether Ankit or the owners set them. **To review.**
+
+### 2.7 Owner self-review guard (migration 026)
+
+**Why it's needed.** After 025, a review needs a genuine, completed `place_order` order. But restaurants complete their own orders, and `place_order` doesn't check who is ordering. Three abuse paths remained:
+- An owner orders from their own restaurant on their owner account, completes the order and rates it 5★.
+- An owner orders from a rival and leaves 1★ once the rival completes it.
+- An owner or their staff does either of those from a customer account on the owner's or the restaurant's own phone number.
+
+**The fix.** `submit_order_review` now refuses, with the existing `REVIEW_NOT_ELIGIBLE:` prefix (no app change), before writing anything, when:
+- the caller isn't role `customer`;
+- the caller owns the order's restaurant;
+- the caller's phone (last 10 digits) equals the restaurant's phone line or its owner's phone.
+
+This also applies to edits. The function's `search_path` is pinned to `''`.
+
+**Not covered.** A second account on a *different* number: nothing in the data identifies it.
+
+**Shipped 2026-09-25, 17:31 IST (PR #60).**
+- **Preview branch:** `026_verify` passed 4/4, and 025 / 024 / 023 were still all green. The end-to-end test passed 13/13, using real `place_order` orders completed through the owner flow:
+  - Accepted: a genuine customer's review and edit, and a review of a *different* restaurant by an account on another restaurant's line.
+  - Refused: an owner reviewing their own restaurant, an owner reviewing a rival, a customer on the owner's phone, and a customer on the restaurant's line.
+  - Refused attempts wrote no rows.
+- **Production:** `db push` applied 026 only. `026_verify` passes 4/4, and 025 / 024 / 023 still pass.
+
+**Existing reviews that break the rule** (production, 2026-09-25, 9 of 95 restaurant reviews). They were left in place for Ankit to decide:
+
+| Restaurant | Reviews | Why flagged | Order ids |
+|---|---|---|---|
+| Sharma Bhojnalaya (seed) | 7 × 3–4★, 20 Jul – 17 Sep, 2 dish reviews each | Reviewer's phone = the restaurant's line (looks like testing) | `280630b5…`, `0dfdd1f5…`, `0bfc428a…`, `11bde4fa…`, `99ba486e…`, `bf8ba467…`, `5f21db91…` |
+| Hotel Aayat | 1 × 5★, 2 Sep | Reviewer's phone = the owner's phone | `cf2f2a0d-ffca-497b-9174-5987a4208b7a` |
+| Tirupati Family Restaurant | 1 × 5★, 24 Aug, 1 dish review | Reviewer has role `owner` but no restaurant | `d1fc99f7-9c67-4823-be14-91002b6166aa` |
 
 ---
 
@@ -278,7 +382,7 @@ This is the setting that makes or breaks the design. The CLI config default is *
 
 ---
 
-## 4. Database — migration 025
+## 4. Database — migration 027
 
 ### 4.1 Identity model
 
@@ -287,7 +391,7 @@ This is the setting that makes or breaks the design. The CLI config default is *
 | `auth.users.phone`, `phone_confirmed_at` | **Supabase Auth** (the OTP proved it) | GoTrue only: OTP verify, phone change, the admin API |
 | `public.users.phone` | Mirror: the 10-digit form of the confirmed auth phone | The trigger for OTP customers. Partners' phones stay admin-set, as today. |
 | `public.users.phone_verified` | Mirror: `true` once the auth phone is confirmed | The trigger, plus the legacy `verify-otp` until Phase 5 |
-| `public.users.full_name` | The customer | The name step and Profile (the only customer-writable column after 026) |
+| `public.users.full_name` | The customer | The name step and Profile (the only customer-writable column after 028) |
 | `public.users.email` | Legacy / partners | Empty string for new customers, whose `auth.users.email` is NULL |
 | `public.users.auth_provider` | Informational | Gains `'phone'` |
 
@@ -295,7 +399,7 @@ This is the setting that makes or breaks the design. The CLI config default is *
 
 ```sql
 -- ============================================================
--- 025_phone_otp_login.sql
+-- 027_phone_otp_login.sql
 -- Phone-OTP login for customers (src/docs/phone_otp_login_plan.md).
 -- auth.users.phone becomes the customer identity; public.users.phone /
 -- phone_verified become a trigger-maintained mirror of it.
@@ -497,20 +601,20 @@ CREATE TRIGGER orders_require_verified_phone
 
 - **Profile creation waits for confirmation (step 2).** Every number someone types creates an auth user, verified or not. Creating the profile only on confirmation keeps `public.users` limited to people who proved they own a number. It also means there's nothing to clean up when someone gives up halfway. `public.users` has no foreign key to `auth.users` (CLAUDE.md), so orphaned profile rows would never go away on their own.
 - **The trigger's WHEN clause (step 3)** fires on a first confirmation (`OLD.phone_confirmed_at IS NULL`) and on a number change. It doesn't fire on routine returning logins. The admin backfill writes `phone` and `phone_confirmed_at` in two separate UPDATEs; the second one fires it.
-- **Why the bypass flag is safe (step 4).** Without the flag, the 005 rule "phone changed ⇒ `phone_verified := false`" would undo the sync's own write. The flag is a custom, transaction-local setting (`set_config(..., true)`). PostgREST gives clients no way to run `SET` or `set_config` in the same transaction as their UPDATE. Also, after 024 and 026 customers can't write `phone` or `phone_verified` at all.
+- **Why the bypass flag is safe (step 4).** Without the flag, the 005 rule "phone changed ⇒ `phone_verified := false`" would undo the sync's own write. The flag is a custom, transaction-local setting (`set_config(..., true)`). PostgREST gives clients no way to run `SET` or `set_config` in the same transaction as their UPDATE. Also, after 024 and 028 customers can't write `phone` or `phone_verified` at all.
 - **What the limiter protects (step 5).** It's a guard against SMS bombing and wallet-draining, not a correctness rule, so the hook **fails open** if the database call errors (the project-wide cap still applies). The advisory lock makes the per-number check exact. Phones are kept for 48 h at most, and `sms_otp_log` is readable only by service_role.
 - **The order trigger (step 6)** changes nothing for honest clients: every customer who reaches checkout is already verified. It closes the gap for pre-launch sessions that never verified a number. Checkout maps `PHONE_NOT_VERIFIED:` to a redirect to `/verify-phone` (§8.4).
 - **Hygiene.** `claim_sms_otp_slot` is `SECURITY INVOKER` and executable only by service_role, following the Supabase guidance on public-schema functions. Trigger functions can't be called over RPC, and `handle_new_user`'s existing permissions aren't touched.
 
 ### 4.4 Verify and roll back
 
-- `supabase/ops/025_verify.sql` is a single `UNION ALL` query that checks:
+- `supabase/ops/027_verify.sql` is a single `UNION ALL` query that checks:
   - `on_auth_user_phone_confirmed` and `orders_require_verified_phone` exist.
   - `pg_get_functiondef` of `handle_new_user` contains `phone_confirmed_at`, and that of `reset_phone_verified` contains `redlotus.phone_sync`.
   - RLS is on for `sms_otp_log`, and `anon` / `authenticated` have no privilege on it.
   - `anon` / `authenticated` can't EXECUTE `claim_sms_otp_slot`.
   - `mobile10('+91 98765-43210') = '9876543210'` and `mobile10('447700900123') IS NULL`.
-- `supabase/ops/025_rollback.sql` does the following:
+- `supabase/ops/027_rollback.sql` does the following:
   - Restores the 002 `handle_new_user` and the 005 `reset_phone_verified` bodies verbatim.
   - Drops both new triggers and their functions, `claim_sms_otp_slot` and `sms_otp_log`.
   - Drops `mobile10` last.
@@ -683,7 +787,7 @@ On branches, test numbers skip the hook, so no secrets and no MSG91 are needed t
 
 ### 7.2 Sizing (counts only, no personal data)
 
-`supabase/ops/025_sizing.sql` works before and after 025 and is safe on production:
+`supabase/ops/027_sizing.sql` works before and after 027 and is safe on production:
 
 ```sql
 WITH c AS (
@@ -716,7 +820,7 @@ FROM c;
 
 ### 7.3 The backfill
 
-`supabase/ops/025_backfill_customer_phones.mjs` is a Node script run by Ankit. It is a dry run by default; `--live` writes.
+`supabase/ops/027_backfill_customer_phones.mjs` is a Node script run by Ankit. It is a dry run by default; `--live` writes.
 
 1. Read `public.users` where `role = 'customer' AND phone_verified`, using the service-role key. Pass it as a shell env var only (`$env:SUPABASE_SERVICE_ROLE_KEY = '…'`), never in a file, never committed.
 2. Normalise each number with the same rule as `mobile10()`. Count and skip anything that doesn't parse.
@@ -725,7 +829,7 @@ FROM c;
    - Skip anyone whose auth phone already equals the target (makes the script safe to re-run).
    - Count a conflict if the target number is already another auth user's phone.
    - Skip profiles with no auth user.
-5. `--live`: call `auth.admin.updateUserById(id, { phone: '91' + m, phone_confirm: true })` one user at a time, about 100 ms apart. This creates the `phone` identity and confirms it (§3.3). The 025 trigger re-mirrors the same number with no change.
+5. `--live`: call `auth.admin.updateUserById(id, { phone: '91' + m, phone_confirm: true })` one user at a time, about 100 ms apart. This creates the `phone` identity and confirms it (§3.3). The 027 trigger re-mirrors the same number with no change.
 6. Print totals (eligible / attached / skipped / conflicts / failed). Save the conflict list to a scratch file, with numbers masked to the last 3 digits plus user ids.
 
 Use the Admin API, never SQL on `auth.users`: the API creates the identity row that GoTrue expects.
@@ -891,7 +995,7 @@ This is for legacy sessions only; new customers never see it. It uses `PhoneOtpF
 | **Fake hook calls** | Standard Webhooks signature check with `SEND_SMS_HOOK_SECRET`. Unsigned requests are refused before anything is read. |
 | **Texting the wrong number** during a phone change | `sms.phone` is the only trusted destination. The fallback to `user.phone` refuses whenever a change is pending (§5.2). |
 | **Unverified numbers in the profile table** | Confirmations ON, profile creation only on confirmation (§4.2), and a hook refusal rolls back the sign-up |
-| **Customer changing role / verification flags** | 024 column grants now; 026 narrows customer writes to `full_name` only. The 005 trigger still blocks `phone_verified = true`. |
+| **Customer changing role / verification flags** | 024 column grants now; 028 narrows customer writes to `full_name` only. The 005 trigger still blocks `phone_verified = true`. |
 | **Ordering without a verified phone** | Order trigger `PHONE_NOT_VERIFIED:` (§4.2 step 6) |
 | **Codes or numbers leaking into logs** | Codes are never logged. Numbers are masked to their last 3 digits. `sms_otp_log` is service-role only and pruned at 48 h. Sentry keeps `sendDefaultPii: false`. |
 
@@ -925,12 +1029,12 @@ No deploys between 12–2 PM or 7–9:30 PM IST. Check the time with PowerShell 
 
 | Phase | What ships | Gate to move on | Rollback |
 |---|---|---|---|
-| **0 — Hotfix** | 024 + `ops/024_verify.sql`. PR → preview branch → verify + functional checks (§2.4) → merge → confirm on production with `db query --linked` (check the Dashboard's Branches page; don't assume it applied). | All verify rows `true` on production; profile, dashboard toggle and menu editor work. | Re-grant (§2.4) |
-| **1 — Backend dark launch** (no UI change) | MSG91 smoke test (§5.3) → 025 on the branch + branch tests B1–B3 with test numbers → merge (deploys `auth-send-sms`) → 025 on production → secrets → Dashboard settings in §6.1 order, **Phone provider last** → `verify-otp` dual write (§7.5) → production checks P1–P6 (§11.3) with Ankit's phone. | P1–P6 pass. MSG91 shows a 6-digit code delivered. A refused number leaves no `auth.users` row. | Turn off the Phone provider and hook (instant). `025_rollback.sql`. |
+| **0 — Hotfix** ✅ 2026-09-25 | 024 + `ops/024_verify.sql`. PR → preview branch → verify + functional checks (§2.4) → `db push` → confirm on production with `db query --linked` → merge. | Done: every verify row is `true` on production (§2.6). | Re-grant (§2.4) |
+| **1 — Backend dark launch** (no UI change) | MSG91 smoke test (§5.3) → 027 on the branch + branch tests B1–B3 with test numbers → merge (deploys `auth-send-sms`) → 027 on production → secrets → Dashboard settings in §6.1 order, **Phone provider last** → `verify-otp` dual write (§7.5) → production checks P1–P6 (§11.3) with Ankit's phone. | P1–P6 pass. MSG91 shows a 6-digit code delivered. A refused number leaves no `auth.users` row. | Turn off the Phone provider and hook (instant). `027_rollback.sql`. |
 | **2 — Backfill** | Sizing (§7.2) → dry run → settle conflicts (§7.4) → `--live` → re-run sizing. | Every eligible verified customer has an auth phone. Conflicts decided. | Backfilled phones are harmless if unused. They can be cleared through the admin API. |
 | **3 — Launch** (web + OTA) | Frontend PR (§8) → Vercel preview on the branch → device matrix (§11.4) → update Play App access (§9.3) → merge off-peak → bump `package.json` version (the OTA gate). | Funnel healthy for 48 h (§12). No login-failure spike in Sentry or the Supabase auth logs. | Vercel instant rollback + Capgo previous bundle. The old flows still work, because Google, email and the legacy functions are all still live. |
 | **4 — Transition** (D9, ≥30 days) | Nothing new. Watch the funnel and Capgo adoption. Re-run the backfill weekly. | 95%+ of active installs on the new bundle, and no customer logins via Google in the last 14 days (auth logs). | — |
-| **5 — Cleanup** | Turn off the Google provider → remove `send-otp` / `verify-otp` from `config.toml` and delete them → **026** (`REVOKE UPDATE ON public.users FROM authenticated; GRANT UPDATE (full_name) ON public.users TO authenticated;`) → docs (§15) → next store build drops the custom-scheme intent filter. | — | Re-enable Google. Re-grant `phone` / `phone_verified`. |
+| **5 — Cleanup** | Turn off the Google provider → remove `send-otp` / `verify-otp` from `config.toml` and delete them → **028** (`REVOKE UPDATE ON public.users FROM authenticated; GRANT UPDATE (full_name) ON public.users TO authenticated;`) → docs (§15) → next store build drops the custom-scheme intent filter. | — | Re-enable Google. Re-grant `phone` / `phone_verified`. |
 
 ---
 
@@ -1050,8 +1154,8 @@ FROM s LEFT JOIN public.users p ON p.id = s.id;
 
 | Finding | Severity | Suggested fix |
 |---|---|---|
-| Customers can make themselves **admin**; owners can edit restaurant / dish ratings, featured and radius columns | **Critical** | §2: migration 024, now |
-| `orders` is probably the same for owners (any column of their restaurant's orders) | Medium | §2.5: audit against the snapshot triggers, then column grants |
+| Customers could make themselves **admin**; owners could edit restaurant / dish ratings, featured and radius columns | **Critical** | **Fixed 2026-09-25**: migration 024 (§2.6) |
+| Customers could create orders directly, including already-`completed` ones that unlock "verified" reviews; owners could rewrite any column of their restaurant's orders | **High** | Audited 2026-09-25 → migration 025 (§2.5) |
 | `delete-account` doesn't clear `orders.customer_name` / `customer_phone`, but the public `/delete-account` page (linked from the Play data-deletion form) says name and phone on past orders are removed | Medium (Play / DPDP) | Add both columns to the orders scrub in `delete-account`. Clear them only on orders in a finished state, so a rider mid-delivery keeps the number. This matters more once the phone number is the login. |
 | `/restaurants/:id` requires login despite anonymous menu browsing (016) | UX | D6: in this build if approved |
 | WhatsApp help number differs between Login/Signup (`919460049608`) and CLAUDE.md (`916378939472`) | Low | D10 |
@@ -1062,9 +1166,11 @@ FROM s LEFT JOIN public.users p ON p.id = s.id;
 ## 15. File checklist
 
 **New**
-- `supabase/migrations/024_column_write_grants.sql`, `supabase/ops/024_verify.sql`
-- `supabase/migrations/025_phone_otp_login.sql`, `supabase/ops/025_verify.sql`, `supabase/ops/025_rollback.sql`, `supabase/ops/025_sizing.sql`, `supabase/ops/025_backfill_customer_phones.mjs`, `supabase/ops/phone_login_funnel.sql`
-- `supabase/migrations/026_phone_otp_cleanup.sql` (Phase 5)
+- `supabase/migrations/024_column_write_grants.sql`, `supabase/ops/024_verify.sql` (shipped)
+- `supabase/migrations/025_orders_write_grants.sql`, `supabase/ops/025_verify.sql`, `supabase/ops/025_rollback.sql` (orders audit)
+- `supabase/migrations/026_owner_self_review_guard.sql`, `supabase/ops/026_verify.sql`, `supabase/ops/026_rollback.sql` (review guard)
+- `supabase/migrations/027_phone_otp_login.sql`, `supabase/ops/027_verify.sql`, `supabase/ops/027_rollback.sql`, `supabase/ops/027_sizing.sql`, `supabase/ops/027_backfill_customer_phones.mjs`, `supabase/ops/phone_login_funnel.sql`
+- `supabase/migrations/028_phone_otp_cleanup.sql` (Phase 5)
 - `supabase/functions/auth-send-sms/index.ts`
 - `src/lib/phoneAuth.ts` + `src/lib/phoneAuth.test.ts`
 - `src/components/auth/PhoneOtpForm.tsx` (+ CSS)
@@ -1089,7 +1195,7 @@ FROM s LEFT JOIN public.users p ON p.id = s.id;
 **Docs after launch**
 - `CLAUDE.md` + `GEMINI.md`:
   - routes table (`/login`, `/partner/login`, `/signup`, `/verify-phone`, `/restaurants/:id`), the auth gates section, the file map;
-  - Critical rules: the phone mirror trigger, "confirmations ON", 024/026 column grants, "hook never returns 429/503";
+  - Critical rules: the phone mirror trigger, "confirmations ON", 024/028 column grants, "hook never returns 429/503";
   - Phone verification section, v2-deferred list (drop OTP login), Hosting & env (the hook secret).
 - `src/docs/v2_deferred_issues.md`.
 - A status line at the top of `phone_verification_plan.md` pointing here.
