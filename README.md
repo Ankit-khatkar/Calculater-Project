@@ -1,1177 +1,1682 @@
-# Coupons & Promo Codes — Build Plan v1
+# Customer App UI Redesign — Figma-Driven Build Plan
 
-> **Status:** Draft for review. Ankit locked D1–D7 on 2026-09-27. D8–D14 are recommendations waiting for a yes/no (§0).
+> **Status:** Draft for review — 2026-10-05. Nothing has been built yet. No code, Figma file or database was changed while writing this plan. Decisions D1–D17 (§0) need Ankit's yes/no before Phase 1.
 > **Author:** Ankit (drafted with Claude)
-> **Revision:** v1 — 2026-09-27
-> **Depends on:** 006 (`discount_config`, `is_discount_active()`), 017 (`promotions` banners), 020 + `send-push` (push notifications), 022 (`place_order` v4, `delivery_fee_for()`, settlement views), 023–025 (explicit grants; no client writes to `orders`), 026 (the conflict-of-interest guard this plan reuses).
-> **Supersedes:** the "no promo codes" lines in `redlotusfoods_documentation.md` §6.7, `business_plan.md` §5.3.5 and `pre_production_checklist.md` ("No discount/promo UI"). Takes "promo codes" off the v2-deferred list in CLAUDE.md. `discount_config`, the automatic festival discount, stays exactly as it is.
-> **Migrations:** numbers are assigned at ship time (phone-OTP login has 027/028 reserved). Phase 1 `0NN_coupons.sql` · Phase 2 `0NN_coupon_programs.sql` · Phase 3 `0NN_referrals.sql`. Each ships with `supabase/ops/0NN_verify.sql` and `0NN_rollback.sql`.
+> **Revision:** v1 — 2026-10-05
+> **Baseline:** measured on `main` @ `76e4a1f`: 312 tests pass in 20 files; bundle sizes in §12.1.
+> **Scope:** every customer-facing screen of the shared web / PWA / Android (Capacitor) codebase: the shell and navigation, Home, Search, Restaurant, Cart & Checkout, Order tracking, Orders, Offers and Profile. Plus one design system that exists twice, in code (`src/styles/tokens.css`) and in Figma (variables + components), kept in sync by name.
+> **Out of scope:** the owner dashboard, marketing pages, auth screens (owned by [phone_otp_login_plan.md](phone_otp_login_plan.md) §8), payments, and any schema, RLS, RPC or Edge Function change.
+> **Migrations:** none. **Native build:** none expected. Everything ships by Capgo OTA; §16.3 lists the optional items that would need a store build.
+> **Coordinates with:** [phone_otp_login_plan.md](phone_otp_login_plan.md) (D6 public menus, `?next=` return path, Profile phone row, D10 WhatsApp number) · [capacitor_native_apps_plan.md](capacitor_native_apps_plan.md) (NativeBridge, OTA safe harbour §5.4) · [customer_ui_revamp_plan.md](customer_ui_revamp_plan.md) (its data contract stays; its layout is superseded) · [location_resilience_plan.md](location_resilience_plan.md) (engine invariants) · [delivery_address_capture_plan.md](delivery_address_capture_plan.md) · [distance_based_delivery_plan.md](distance_based_delivery_plan.md) (Principle 1) · [coupons_and_promo_codes_plan.md](coupons_and_promo_codes_plan.md) · [reviews_and_ratings_plan.md](reviews_and_ratings_plan.md) · [restaurant_card_slideshow_plan.md](restaurant_card_slideshow_plan.md) · [design.md](design.md) (superseded by §5 once Phase 1 lands).
+> **Brief:** the "senior mobile UI/UX designer" prompt Ankit supplied on 2026-10-05. It asks for Zomato / Swiggy / DoorDash patterns as inspiration, a distinct RedLotus identity, no fake data and no business-logic change. Where the brief and RedLotus disagree, §2 records which wins and why.
 
 ## At a glance
 
-- Customers apply a **coupon** at checkout and the bill goes down. They can type the code, pick it from an **offers list**, or arrive with it already applied from a banner, a push notification or a share link.
-- **One coupon per order**, and never together with the automatic festival discount. The customer gets whichever saves more.
-- **Three discount types:** % off with a cap, flat ₹ off, and free delivery. A coupon never touches the platform fee, the surge fee, the commission or the restaurant's payout.
-- **Four kinds of code:**
-  - public, e.g. `DIWALI50`;
-  - single-use batch, e.g. 200 codes for flyers;
-  - personal, e.g. an apology or a gift for one customer;
-  - referral, each customer's own code to share.
-- **Time windows** on any coupon: dates, weekdays and hours of the day, all in IST.
-- **Automatic codes** triggered by the customer's own history:
-  - an apology when an order is declined or expires;
-  - a thank-you after the first delivered order;
-  - a reward on every 5th order;
-  - a win-back after 30 days without an order;
-  - the referral reward.
-- **RedLotus pays for every coupon.** Restaurants are still paid on the full menu price, and nothing changes for owners or their dashboard.
-- **The server checks every coupon.** `place_order` checks it again in the same transaction that creates the order, with the coupon's row locked. So two customers can't both take the last use, and a public code can't go over its budget.
-- **A use is an order.** There's no separate table of uses to keep in sync: a coupon's uses are the orders that carry it. When an order is declined, expires or is cancelled, the use comes back automatically.
-- **You manage it from the Supabase Dashboard**, the same way you manage `discount_config` today. That means rows in two tables, a few SQL helpers (generate a batch, issue a personal code) and some saved reports. There's no admin page.
-- **Nothing changes until you create a coupon.** Shipping the migration changes nothing for anyone until a coupon row exists. `UPDATE coupons SET active = false` switches every coupon off at once.
-- **Three phases:**
-  1. The engine, plus every kind of code you create by hand.
-  2. Automatic codes.
-  3. Referrals and push campaigns.
+- **Design in Figma first, then code from Figma.** Claude builds the design system and screens in Figma through the Figma MCP server. Ankit reviews and approves each screen there. Code is then implemented from the approved frames with `get_design_context`. No screen is coded before its frame is approved.
+- **The connected Figma account is on the Starter plan** (Full seat), checked 2026-10-05. That gives 200 MCP calls a day (10 a minute), 3 design files with 3 pages each, and **no Code Connect** (Organization / Enterprise only). The plan fits inside that: one design file with three pages plus one FigJam file, and Figma ↔ React mapping by naming convention (§13).
+- **One design system in two places.** `src/styles/tokens.css` holds CSS custom properties (`--rl-…`). Figma variables mirror them 1:1 with `var(--rl-…)` code syntax, so design-to-code output lands on real tokens. The palette is today's palette, consolidated, with three changes made for contrast and FSSAI conformance (§5.2).
+- **An app shell with a bottom navigation bar**: Home · Search · Orders · Offers · Profile, on phones and tablets. It replaces the marketing `Navbar`, which every customer screen except Home uses today.
+- **Screens are restyled around their logic, not through it.** Pricing, coupons, the geofence, `place_order`, Realtime and the geolocation engine are moved verbatim or not touched at all. §15.4 lists every invariant to re-verify.
+- **No fake data.** Every element maps to a real source (§3). Things the backend can't support yet (delivery-time estimates, cost for two, menu categories, popularity) are left out, not invented, and §3.1 says what would make each one real.
+- **It ships by OTA in two waves**: Browse (shell, Home, Search, Restaurant), then Transact (Checkout, Orders, Offers, Profile). Each wave is tested on the Capgo `staging` channel first and released only after Ankit's review.
 
 ---
 
 ## 0. What this plan needs from Ankit
 
-| # | Decision | Status | Why it matters |
+| # | Decision | Recommendation | Why it matters |
 |---|---|---|---|
-| **D1** | Who pays for a coupon | **Locked: RedLotus.** | It works like the festival discount: the restaurant is paid on the full menu price, and the coupon comes out of RedLotus's commission and fees. Settlement, the owner dashboard and the owner's notifications don't change (§5.10, §10). |
-| **D2** | A coupon together with the festival discount | **Locked: one or the other.** Checkout applies whichever saves more, and the server never applies both. | Keeps the Discount-Funding Invariant (commission higher than the automatic discount, `distance_based_delivery_plan.md` §3.8) intact. A coupon on top of the 11% discount would lose money on the food on almost every order (§4). |
-| **D3** | Discount types | **Locked: % off with a cap, flat ₹ off, free delivery.** Free dish / BOGO waits for v2. | Each type is one formula over numbers checkout already has (§3.3). |
-| **D4** | How coupons are managed | **Locked: Supabase Dashboard, SQL helpers and saved reports.** | Matches `v2_deferred_issues.md` §2, which says no admin panel (§5.11). |
-| **D5** | Unique codes | **Locked: personal, single-use batch, and referral.** | §3.2, §7. |
-| **D6** | Event-based codes | **Locked: scheduled campaigns, customer milestones, and apology codes.** | §3.4, §6. |
-| **D7** | How customers find codes | **Locked: typed at checkout, an offers list at checkout, "My coupons", and banners + push.** | §5.7, §5.8, §8. |
-| **D8** | Build order | **Recommend three phases:** (1) the engine and codes you create by hand, (2) automatic codes, (3) referrals and push campaigns. | Phase 1 alone delivers public, event, personal and batch codes. Referral is the piece people will most try to abuse, so it should land on an engine that's already proven. |
-| **D9** | A coupon used on an order that is declined, expires or is cancelled | **Recommend: the use comes back automatically**, if the coupon is still valid. | The customer got no food and paid nothing (COD), so losing the coupon too would be a second disappointment. The design gives this for free (§3.6). |
-| **D10** | Who counts as a "new customer" | **Recommend:** no order that wasn't declined, expired or cancelled has ever been placed from this account **or this phone number**. | Checking the phone as well as the account stops "delete the account, sign up again, get the welcome coupon again" (§9.4). |
-| **D11** | Applying coupons automatically | **Recommend: never apply a coupon the customer didn't choose.** A code that arrives through a banner, a push or a share link counts as chosen. Checkout suggests the best coupon but doesn't apply it. | If listed public coupons applied themselves, every targeted campaign would become a discount paid for on every order. |
-| **D12** | A ceiling on any one coupon | **Recommend: ₹500 per order**, as a database CHECK. | This guards against typos: `5000` instead of `50` can't be saved. Raise it with a migration if a real campaign needs more. |
-| **D13** | Starting values for the automatic codes and the welcome offer | **Recommend the table in §6.1.** Every value is a Dashboard row and can change at any time. | These are the only numbers this plan makes up. |
-| **D14** | Terms of Service coupon clause | **Needs sign-off.** Draft in §5.9. | Customer-facing legal copy, like the `PartnerProgram.tsx` rewrite. |
+| **D1** | Navigation model | **Yes:** a 5-tab bottom bar, Home · Search · Orders · Offers · Profile, with labels always visible. Shown below 1024 px on the five tab screens only. Drill-down screens (restaurant, checkout, order detail, review, saved addresses) get a back-arrow header instead. Owners never see it. Desktop keeps one top bar with the same five links. | Today Orders, Offers and Profile are reachable only from the avatar menu. Every screen except Home shows the marketing `Navbar` with a hamburger and, for logged-out visitors, "Partner Program / About Us" links. That is two navigation systems in one product. |
+| **D2** | Search gets its own route | **Yes:** `/search` is a tab. Home's search bar and category chips open it. Recent searches are kept per device (max 8) and cleared on sign-out. | Moves about 400 lines of search and filter code out of `DiscoveryPage` (1,174 lines). One results UI serves both text and category search. |
+| **D3** | Cart and checkout stay one screen at `/checkout` | **Yes:** restructured into sections, with a sticky footer: "Place order · ₹X". No separate `/cart` route. | A separate cart would either duplicate the pricing and geofence logic or show a total that can't be known without an address (Principle 1). |
+| **D4** | Public restaurant menus | **Yes:** take `/restaurants/:id` out of `ProtectedRoute`. Ship it with whichever of this plan or the OTP plan lands first (it is that plan's D6). | The brief's critical flow starts logged out. Today the first restaurant tap hits the login wall and, after login, returns the visitor to Home rather than the restaurant. |
+| **D5** | Logged-out visitors on the Orders and Profile tabs | **Yes:** show an in-place "Log in to see your orders" panel instead of redirecting to `/login`. | The tab bar stays and the visitor keeps their place. The data is still protected by RLS. |
+| **D6** | Header location copy | **"Your location ▾"** above the locality label, not "Delivering to". | The bar sets the *browse origin*. The delivery pin is confirmed at checkout. "Delivering to" would promise something the bar doesn't do. |
+| **D7** | Checkout's default address | **Yes:** if the browse origin is one of the customer's saved addresses (same coordinates), checkout pre-selects that address. Otherwise keep today's rule (top row of the book). | Prevents browsing at "Office" and then finding "Home" pre-selected at checkout. This is the only selection-logic change in the plan, and it reads existing data only. |
+| **D8** | Typography | **Plus Jakarta Sans for all UI.** DM Serif Display only for the wordmark and a few editorial headings. | Keeps the brand's character while giving app screens the dense, legible type they need. |
+| **D9** | Veg / non-veg marks | **Shape-coded, per the FSSAI convention:** a green circle for veg, a brown triangle for non-veg, both in squares, with darker colours for contrast. | Today both marks are dots told apart only by colour (`#2ECC71` at 2.1:1 on white). That fails WCAG 1.4.1 and 1.4.11. The non-veg red also collides with the brand red. |
+| **D10** | Self-host the two font families | **Yes:** bundle the woff2 files and drop the Google Fonts CDN. | One fewer third-party origin at cold start. Fonts work offline in the native shell, which has no service worker, and they ride in the OTA bundle. |
+| **D11** | Saved-addresses screen in Profile | **Yes:** list, set default and delete, on the existing `addressBook.ts`. Adding a new address stays in checkout for v1. | The address book shipped in 015. Only its management screen was deferred, and the data layer for it already exists. |
+| **D12** | Sections derived from ratings | **Yes:** a "Top rated near you" rail (needs ≥ 3 restaurants with ≥ 5 ratings) and a "Top rated here" menu section (needs ≥ 2 dishes with ≥ 3 ratings). Both hide below their thresholds. | These are real data. They replace the brief's "Popular" and "Top picks" rails, which have no backing data. |
+| **D13** | Order tracking refreshes itself | **Yes:** refetch the order when the app resumes, when the tab becomes visible and when the Realtime channel reconnects. | Supabase Realtime doesn't replay missed events. A phone that slept through "Out for delivery" shows a stale status until a manual reload. The owner dashboard already refetches on reconnect. |
+| **D14** | Release strategy | **An integration branch and two waves:** Browse, then Transact. Each wave is tested on the Capgo `staging` channel, then released after Ankit's review. | Phase-by-phase releases would put a half-old, half-new app in customers' hands for weeks. One big release would be too large to review. |
+| **D15** | Figma plan | **Stay on Starter:** 1 design file × 3 pages, plus 1 FigJam file. Upgrade only if the limits start to bite. | It fits (§13.1). Professional Full seats get the same 200 calls a day, so upgrading buys more files and pages but no more MCP budget. |
+| **D16** | Rating display | **Keep the gold star and the number.** No green rating pills. | Green pills are Zomato's signature. The gold star is already RedLotus's (`starGold #F5A623`). |
+| **D17** | WhatsApp number on customer screens | **Ankit to answer.** The code uses `919460049608` (storefront, login, error screen) and `916378939472` (delete-account page, partner pages, owner tools). CLAUDE.md lists `916378939472`. | Same question as the OTP plan's D10. The redesign moves the numbers into one `src/lib/contact.ts` and keeps each surface's current number until this is answered. |
+
+**Also before Phase 1:** run the read-only data-audit SQL in Appendix C (it sizes rails and thresholds with real data), and confirm that the Figma account `whoami` reports (Starter team, Full seat) is the one to use.
 
 ---
 
-## 1. Why this feature
+## 1. Why this redesign
 
-### 1.1 What exists today
+### 1.1 The customer app today
 
-There is one discount, `discount_config` (006). It's a single row that gives *everyone* 11% off, capped at ₹50, on orders of ₹200 or more, and it's switched on for festivals from the Dashboard. It can't be aimed at anyone in particular:
-- It can't target a new customer, a customer who has stopped ordering, one restaurant, one evening, or one unhappy customer.
-- It can't be limited to 100 uses or to ₹5,000 of spend.
-- Nothing records which campaign produced which order.
+Traced from the code on 2026-10-05:
 
-### 1.2 What coupons add
+| Screen | Route | File (lines) | Header | Loading UI | Notes |
+|---|---|---|---|---|---|
+| Home / storefront | `/` | [`DiscoveryPage.tsx`](../pages/discovery/DiscoveryPage.tsx) (1,174) | `AppTopBar` | Card skeletons | Owns the geolocation engine, search, category filter, cart bar and nine empty states |
+| Restaurant | `/restaurants/:id` | [`RestaurantMenu.tsx`](../pages/restaurants/RestaurantMenu.tsx) (503) | Marketing `Navbar` | "Loading menu…" text | Behind a login wall. Hero uses the single legacy `image_url`. Flat menu. |
+| Checkout | `/checkout` | [`Checkout.tsx`](../pages/checkout/Checkout.tsx) (1,155) | `Navbar` | A skeleton for the delivery-fee line only | The Place Order button sits at the end of a long page and isn't sticky |
+| Order status | `/orders/:id` | [`OrderStatus.tsx`](../pages/orders/OrderStatus.tsx) (616) | `Navbar` | "Loading order…" | Tracker labels are raw enum text ("out for delivery") |
+| Orders | `/orders` | [`OrderHistory.tsx`](../pages/orders/OrderHistory.tsx) (210) | `Navbar` | "Loading…" | Badge text is raw enum text |
+| Offers | `/coupons` | [`CouponsPage.tsx`](../pages/coupons/CouponsPage.tsx) (323) | `Navbar` | "Loading offers…" | |
+| Profile | `/profile` | [`Profile.tsx`](../pages/profile/Profile.tsx) (238) | `Navbar` | none | No log-out, help, legal or address rows on the page itself |
+| Review | `/orders/:id/review` | [`OrderReview.tsx`](../pages/orders/OrderReview.tsx) (304) | `Navbar` | "Loading…" | |
 
-Targeting, in four ways:
+### 1.2 Problems found
 
-| Axis | Examples |
+1. **Two navigation systems.** Home has an app header. Every other customer screen uses the website `Navbar` with a hamburger. There is no persistent navigation, so Orders, Offers and Profile hide behind the avatar menu.
+2. **The login wall arrives early.** `/restaurants/:id` is wrapped in `ProtectedRoute`, which redirects to `/login` without a return path. A logged-out visitor's first restaurant tap ends on the login page, and after login they land on Home (this is the OTP plan's §1.1 finding).
+3. **No design system.** Only `Hero.css` uses CSS variables. The rest of the code repeats hard-coded values:
+   - 9 copies of `formatPrice` and 2 of `formatDistance`;
+   - 7 spellings of the same two font stacks;
+   - about 10 border radii (12, 8, 10, 14, 16, 9, 6, 20, 24, 18 px);
+   - 65 `@keyframes` blocks across 62 CSS files, 16 of them separate spinners;
+   - six near-identical light-red tints (`#fdecea`, `#fdedec`, `#fef2f2`, `#fde8e8`, `#fce5e2`, `#fff5f4`) and red-tinted shadows chosen per file.
+4. **Accessibility gaps.**
+   - Muted text colours fall below AA for small text: `#9ca3af` (2.5:1), `#9a9189` (3.1:1), `#8a8178` (3.8:1).
+   - Veg and non-veg are told apart only by colour, and the veg green `#2ECC71` sits at 2.1:1.
+   - Modals restore focus but don't trap it.
+   - Android's hardware back leaves the page instead of closing an open sheet.
+5. **Loading, empty and error states are inconsistent.** Six screens show plain "Loading…" text. A deep link to a closed restaurant renders "Something went wrong. Not found."
+6. **Order screens degrade when a kitchen is closed.** Customers can read only open restaurants and their available dishes (RLS). After closing time, order history says "Restaurant", the order page shows no restaurant name, items read "Item", and the veg mark falls back to **non-veg** (§18 F1).
+7. **Checkout hides its own blockers.** When Place Order is disabled, the reason is in another section that may be off-screen.
+8. **No scroll management.** There's no `ScrollRestoration` (it needs a data router) and no `scrollTo`, so a new page can open at the previous page's scroll offset. Verify in the Phase 0 baseline.
+9. **Image rules drifted.** The restaurant page shows one legacy image, while cards show a five-image slideshow. `models.ts` calls promo media "1:1", but the carousel renders 16:9.
+10. **The index chunk is heavy** (390.6 kB raw, about 124 kB gzip), because the storefront is eager. The redesign must not grow it (§12).
+
+### 1.3 What this is not
+
+- **Not a backend change.** No migration, RLS, RPC or Edge Function. Queries may *add* columns that existing grants already allow (§3).
+- **Not a logic rewrite.** Pricing, coupons, the geofence, order placement, cancellation, reviews, push, the geolocation engine and auth stay as they are (§15.4).
+- **Not the owner dashboard.** `/dashboard*` is untouched. It may adopt the tokens later, under a separate plan.
+- **Not the login redesign.** `/login`, `/signup`, `/verify-phone`, `/auth/callback` and `/reset-password` belong to the OTP plan. This plan gives that work tokens and primitives to build with (§8.9).
+- **Not dark mode, Hindi or iOS native.** Tokens are structured so dark mode can be added later (§5.1), but this plan ships light only.
+
+---
+
+## 2. The brief vs. what RedLotus actually is
+
+The brief is generic. These are the places where it doesn't match this codebase, and what wins.
+
+| The brief asks for | Reality in RedLotus | This plan |
+|---|---|---|
+| "Preserve the existing Razorpay/payment integration"; a "Pay ₹249" button | There is no payment integration. v1 is cash on delivery only (CLAUDE.md product constraints; Razorpay deferred in `capacitor_native_apps_plan.md` §7). | No payment UI. The CTA stays "Place order · ₹X", and a static "Cash on delivery" row explains payment. Nothing to preserve. |
+| A "pays" step in the critical flow | Placing an order is the confirm dialog → `place_order` | Verification reads "places the order (COD)" (§15.2). |
+| "Taxes if applicable" | `CartPricing` has no tax line | No tax row. |
+| "Payment methods if supported" in Profile | Not supported | Omitted. |
+| Delivery time on restaurant cards | No per-restaurant field. ETA is per order, set by the owner at accept time (`orders.eta_minutes`). | Cards show distance. Tracking shows the owner's ETA. |
+| "Price information" (cost for two) | Not modelled | Omitted. |
+| Menu categories on the restaurant page | Menu-item categories are a v2 deferral (`menu_items` has no category) | A toolbar, "Top rated here" and the full list. The category jump list is designed but hidden until a column exists. |
+| "Popular dishes", "Popular near you", "Top picks for you", "Fast delivery" | No client-readable popularity or preparation-time data | Only "Featured" (admin flag) and "Top rated" (ratings, D12) are built. |
+| "Popular searches" | No search analytics exist | "Explore categories", from the admin-curated `menu_categories`. Never labelled "popular". |
+| A notification icon | No in-app notification inbox; push only | No bell. |
+| A "Pickup" tracker step | Statuses run pending → accepted → preparing → out_for_delivery → completed | "On the way" covers pickup. No invented step. |
+| Timestamps for every tracker step | Only `created_at` and `accepted_at` are stored | Those two steps show times; the others are untimed. |
+| "Preserve Phone OTP" | MSG91 phone verification (`/verify-phone`) is live. OTP *login* is a separate plan. | Untouched (§8.9). |
+| Coupon "Apply" buttons; "never validate coupons only on the client" | Coupons are already validated by the server (`preview_coupon`, `place_order` v5) | UI only. Every apply still goes through `preview_coupon`. |
+| Add-to-cart animation and button feedback | The shipped binary has no haptics plugin | Visual feedback only. Haptics would need a store build (§16.3). |
+| "Use the existing logo and brand assets" | `public/logo-mark.svg` (the same mark as the launcher icon) and a wordmark set in DM Serif Display. The Play Store graphics use a different bold sans wordmark. | Use `logo-mark` and the current wordmark. The store-graphics wordmark is a brand question (§18 F6). |
+| Copy that calls it a "mobile app" | CLAUDE.md copy rule: never "app", "download" or "install" (the web-only `InstallPrompt` excepted) | Copy stays neutral. |
+| A "Search" tab | Search lives inside Home today | A new `/search` route (D2). |
+
+---
+
+## 3. UI → data contract
+
+Every element below maps to a real source. **Real** = read as stored. **Derived** = computed on the client from real fields. Nothing in this table needs a schema change.
+
+| Screen | Element | Source | Kind |
+|---|---|---|---|
+| Home | Location label | `locationCache` label ← `reverseGeocode()` (Nominatim), or a saved address's label, or "Gudha Gorji" (`VILLAGE_LABEL`) | Real |
+| Home | Avatar or "Log in" | `AuthContext.profile` | Real |
+| Home | Promo carousel | `promotions` (RLS publishes only live rows), image or muted video, optional `link_url` | Real, hidden when empty |
+| Home | Category chips | `menu_categories` (`image_url`, or the existing emoji fallback) | Real |
+| Home | Offer strip | `discount_config` (`isLive`), plus `delivery_config` free-delivery minimum and distance. The delivery half is omitted while the config is null (Principle 1). | Real |
+| Home | Featured rail | `restaurants.is_featured` / `featured_rank`, intersected with the nearby set | Real |
+| Home | Top rated rail | `restaurants.rating_avg` / `rating_count`, intersected with the nearby set (D12) | Derived |
+| Home | Restaurant cards | `name`, `cuisine_type`, `address`, `image_urls` → `image_url` (`getCardImages`), rating, distance (haversine from the browse origin), restaurant-specific offer (`list_offers` → `bestOfferFor`), featured tag | Real / derived |
+| Home | "N restaurants near you" | Size of the nearby set | Derived |
+| Home, Search, Restaurant | Cart bar | `CartContext`: item count and **item total only** (no address yet, so no fee) | Real |
+| Search | Recent searches | `localStorage`, this device only; the customer's own input | Real |
+| Search | Suggestions and results | Nearby restaurants (`restaurantMatches`) and dishes fetched with `.in(nearbyIds)` (`dishMatches`). The token-AND matcher is unchanged. | Real |
+| Restaurant | Hero | `image_urls` (slideshow) → `image_url` → placeholder. Needs `image_urls` added to the select; it is in the anon column grant. | Real |
+| Restaurant | Name, cuisine, address, rating, reviews | `restaurants`, `restaurant_reviews` (`listRestaurantReviews`) | Real |
+| Restaurant | Distance; "doesn't deliver to your location" notice | Haversine from the browse origin to `lat` / `lng`, compared with `delivery_radius_km`. Needs those three added to the select; all are anon-granted. | Derived |
+| Restaurant | Offer chips | `discount_config`, `delivery_config`, `list_offers` (`bestOfferFor`). Copy logic moves verbatim. | Real |
+| Restaurant | Menu | `menu_items` (RLS returns available dishes only): name, description, price, `image_url`, `is_veg`, rating | Real |
+| Restaurant | "Top rated here" | `menu_items.rating_avg` / `rating_count` (D12) | Derived |
+| Checkout | Everything | Unchanged sources: `CartContext`, `computeCartPricing`, `delivery_config`, `discount_config`, restaurant geo, `delivery_addresses`, coupons (`preview_coupon`, `list_offers`) | Real |
+| Order tracking | Status, ETA, items, bill, address | `orders` + joins, Realtime `UPDATE`, `computeEtaWindow`, the stored fee snapshot, `receiptDiscountLine` | Real |
+| Order tracking | Step times | `created_at` (placed) and `accepted_at` (accepted) only | Real |
+| Orders | Cards | Today's select. An optional item summary adds `order_items(quantity, menu_items(name))`; customers can read their own `order_items`. | Real |
+| Offers | Lists, checker, referral | `list_offers`, `preview_coupon`, `get_my_referral_code` | Real |
+| Offers | Festival and free-delivery cards | `discount_config` (when live), `delivery_config` | Real |
+| Profile | Header | `users`: `full_name`, `phone`, `phone_verified`, `email` | Real |
+| Profile | Saved addresses | `delivery_addresses` via `addressBook.ts` | Real |
+| Profile | Version line | `VITE_APP_VERSION` (package.json) | Real |
+
+### 3.1 Data gaps: designed for, but not shown
+
+| Gap | How the UI handles it now | What would make it real (not in this plan) |
+|---|---|---|
+| Menu categories / sections | Hidden. The jump-list component is designed in Figma only. | A `menu_items.section` column or a `menu_sections` table (v2 "menu-item categories") |
+| Delivery-time estimate per restaurant | Distance only | A server-side estimate, e.g. the median of past `eta_minutes` per restaurant through a SECURITY DEFINER RPC |
+| Popular dishes / restaurants | Not built | A SECURITY DEFINER RPC returning order counts per dish (no personal data) |
+| Timestamps for preparing, on the way and delivered | Untimed steps | Stamp columns or a status-history table |
+| Live rider location | Not built | v2 delivery tracking |
+| Notification inbox | No bell | A notifications table (v2) |
+| Reorder | Not built | A current-price and availability check before refilling the cart, so stored `unit_price` snapshots are never reused |
+| Cost for two | Not shown | A new restaurant column |
+| Order screens for closed restaurants | Neutral fallbacks (§8.5) | §18 F1 |
+
+---
+
+## 4. Design direction
+
+### 4.1 Principles
+
+1. **Food first.** Photos and dish names carry each screen. Chrome stays quiet.
+2. **One accent.** Brand red marks primary actions, the active tab, offers and selection. Green appears only for veg, success and live order progress.
+3. **Honest UI.** Every element maps to data (§3). Missing data means a missing element, never a filled-in guess.
+4. **Thumb first.** Primary actions sit in the bottom third of the screen, in sticky bars. Touch targets are at least 44 px (48 px for navigation).
+5. **Fast on cheap phones.** Motion is CSS only, there are no new runtime dependencies, and skeletons match the layout they stand in for.
+6. **Calm density.** 16 px side gutters, an 8-point rhythm and lightly elevated cards. Lists, not grids, on phones.
+7. **One system everywhere.** Tokens and primitives only; no per-screen colours.
+8. **A local voice.** Short, plain, warm English that knows it serves Gudha Gorji.
+
+### 4.2 What makes it RedLotus and not Zomato
+
+| Pattern borrowed from food-delivery apps | RedLotus treatment |
 |---|---|
-| **Who** | everyone · first-time customers · returning customers · one named customer · whoever holds a printed flyer · a friend of an existing customer |
-| **When** | Diwali week · IPL match nights · weekday afternoons, 3–6 PM · the 7 days after a declined order |
-| **Where** | every restaurant · one restaurant's launch week · the three restaurants near the college |
-| **How many** | once per customer · the first 300 uses · until ₹10,000 is spent · one code, one use |
-
-Coupons also make results measurable. Every coupon order carries its code, so "what did Diwali cost, and how many new customers did it bring?" becomes one query (§5.12).
-
-### 1.3 What stays the same
-
-These rules come over from the pricing plans unchanged:
-
-1. **Only the database sets prices.** The client works out the discount so it can *show* it. `place_order` works it out again and rejects a claim that doesn't match. No coupon value is hardcoded in the frontend.
-2. **A dangerous setting must be impossible to save, not just discouraged.** The database refuses three kinds of coupon: one that makes the food free, a shareable one with no limit on total spend, and one that takes ₹5,000 off an order (§3.9).
-3. **Every order is shown from its own snapshot.** The coupon code and its value are stored on the order, so editing or pausing a coupon never changes a past receipt.
-4. **Restaurants are paid on the full menu price.** Commission is still worked out on the item total before any discount.
-
----
-
-## 2. What Zomato does, and what we copy
-
-### 2.1 How coupons work on Zomato
-
-- An **"Apply coupon" page** at checkout: a code box, then a list of coupons for this cart. Coupons the customer can't use yet stay in the list, locked, with the reason ("Add ₹60 more to avail this offer").
-- **One coupon per order.** Restaurant offers are shown separately, and applying a coupon replaces one.
-- **Personal coupons**, such as first-order, win-back and apology coupons, that only appear on one account.
-- **Referrals** ("Invite friends, get ₹X").
-- **Payment and bank offers**, and a **wallet** (Zomato Money) for credits and refunds.
-
-### 2.2 What we copy
-
-The checkout page, locked coupons with a reason, one coupon per order, personal coupons, apology coupons and referrals.
-
-### 2.3 What we don't copy, and why
-
-| Zomato | Us | Why |
-|---|---|---|
-| Wallet credits / cashback | Credits arrive as **personal coupon codes** | We're COD only: there's no balance to credit and no refunds. A code does the same job without keeping a money ledger. |
-| Bank / UPI offers | — | No online payment. |
-| Offers the restaurant sets up and pays for | — (v2) | D1: RedLotus pays. Restaurant-funded offers need the owner's consent, owner screens and a payout change (§14). |
-| Applying the best coupon automatically | Suggest it, never apply it (D11) | RedLotus pays for every coupon, so a coupon that applies itself is a discount for everyone. |
-| A coupon on top of a restaurant offer | One or the other (D2) | See §4. |
-
----
-
-## 3. The model
-
-### 3.1 Three words
-
-- A **coupon** is a set of rules: what it gives, when, to whom, at which restaurants, and how many times. "Diwali 2026" is one coupon. Coupons live in `coupons`.
-- A **code** is what the customer types.
-  - A public coupon has one code (`DIWALI50`).
-  - A batch coupon has 200, one per flyer.
-  - A personal coupon template has one code for each customer it's been issued to.
-
-  Codes live in `coupon_codes`, and every code belongs to exactly one coupon.
-- A **use** is an order. An order that used a code carries `orders.coupon_id` and `orders.coupon_code_id`. There's no separate table of uses (§3.6).
-
-### 3.2 Four kinds of code
-
-| Kind | Who can use a code | Uses per code | Typical codes | Created by |
-|---|---|---|---|---|
-| **public** | anyone who meets the rules | set by the coupon's limits | `DIWALI50`, `WELCOME50`, `IPLNIGHT` | Ankit: one row per code |
-| **batch** | whoever enters it first | 1 | `7KQ9XM2P`, ×200 | `private.coupon_generate_batch()` |
-| **personal** | only the customer it was issued to | 1 | `SORRY4KQ7` | Ankit (`private.coupon_issue_personal()`) or an automatic programme (§6) |
-| **referral** | new customers, except the code's owner | set by the coupon's limits | `ANKIT7Q` | the customer, from the "Refer friends" card (§7) |
-
-A coupon's `kind` decides the kind of every code under it, and a trigger on `coupon_codes` enforces that (§5.1).
-
-To track influencers or college ambassadors separately, give each one their own public coupon and code. The reports then show each person's results (§5.12).
-
-### 3.3 Three discount types
-
-All amounts are whole rupees, rounded half away from zero. That's the rounding `discount_config` already uses, and SQL `ROUND` and JavaScript `Math.round` agree on positive values.
-
-| Type | `discount_value` | `max_discount` | Takes money off | Amount |
-|---|---|---|---|---|
-| `percent` | 1–100 (%) | **required** | the item total | `min(round(subtotal × value / 100), max_discount)` |
-| `flat` | rupees | must be empty | the item total | `value` |
-| `free_delivery` | must be empty | optional cap | the delivery fee | `min(delivery_fee, max_discount ?? delivery_fee)` |
-
-Every coupon also has a `min_subtotal`. Below it, the coupon doesn't apply, and checkout shows "Add ₹X more". It's measured on the item total before any discount, as the festival discount's ₹200 threshold and the ₹199 free-delivery waiver already are.
-
-**The food can never become free.** Two CHECKs require:
-- `max_discount < min_subtotal` for percent coupons;
-- `discount_value < min_subtotal` for flat coupons.
-
-So a flat or percent coupon always leaves some food on the bill, and `orders.total_amount > 0` (001) can never fail because of a coupon.
-
-**Free delivery only removes the delivery fee**, both its base and distance parts. It never removes the surge fee or the platform fee. If delivery is already free on the order (the ₹199 / 1.5 km waiver in `delivery_config`), a free-delivery coupon saves ₹0. Checkout says so instead of spending the code.
-
-### 3.4 When: event windows
-
-Every coupon can be limited in time. Like `is_discount_active()`, all of these are checked in IST:
-
-| Column | Meaning | Example |
-|---|---|---|
-| `active` | turns the coupon off | `false` stops it from the next order onwards |
-| `starts_at` / `ends_at` | the campaign's dates | Diwali week: `2026-11-06 00:00+05:30` → `2026-11-13 00:00+05:30` |
-| `active_days` | days of the week, 0 = Sunday … 6 = Saturday; empty = every day | IPL nights: `{0,6}` for weekend matches |
-| `daily_start` / `daily_end` | hours of the day; both empty = all day | weekday snacks: `15:00` → `18:00` |
-| `coupon_codes.expires_at` | one code's own expiry | an apology code, valid 7 days from when it was issued |
-
-A daily window can run past midnight, e.g. `22:00` → `02:00`. The day-of-week check uses the calendar date at the time of the order. So a Friday-night window that runs past midnight needs both `5` and `6` in `active_days`.
-
-A code stops working at whichever comes first: the coupon's `ends_at` or the code's own `expires_at`.
-
-### 3.5 Who and where
-
-- **`audience`**: `everyone`, `new_customers` (D10), or `returning_customers` (at least one delivered order).
-- **`restaurant_ids`**: empty means every restaurant. Otherwise it's the list of restaurants the coupon works at.
-- **Customer accounts only.** The guard from migration 026 is reused as it is. A coupon is refused when any of these is true:
-  - the caller isn't a `customer`;
-  - the caller owns the restaurant being ordered from;
-  - the caller's phone (last 10 digits) matches the restaurant's line or its owner's phone.
-
-  Without the guard, an owner could order from their own restaurant with a coupon RedLotus pays for, and keep the difference at settlement (§9.5). **Ankit's admin account can't use coupons either, so test with a customer account.**
-
-### 3.6 How many, and why a use is an order
-
-| Limit | Column | What it counts |
-|---|---|---|
-| Per customer | `coupons.per_customer_limit` (default 1) | this customer's live orders with this coupon, matched by account **or** phone. Applies to public, batch and referral coupons. A personal code is single-use anyway. |
-| In total | `coupons.total_limit` | all live orders with this coupon |
-| Budget | `coupons.budget_rupees` | `SUM(discount_amount)` over live orders with this coupon |
-| Per code | `coupon_codes.max_uses` (batch and personal codes: 1) | live orders with this code |
-
-A **live** order is any order that isn't `declined`, `expired` or `cancelled`. That has four consequences:
-
-- A **pending** order holds its use, so two orders can't both take the last one.
-- When an order is declined, expires or is cancelled, it stops counting and the use comes back (D9). There's no separate step to release the use, so there's nothing to forget and nothing that can fail: the change of status is the release.
-- A **completed** order keeps its use for good.
-- Pending orders count against the budget as well, so a campaign can't overspend while orders are waiting for restaurants to accept them.
-
-Counting orders, rather than keeping a separate table of uses, means there's one answer to "was this code used?": the order. A separate table would need a trigger to release a use on every status change, and a bug in that trigger would either leave uses that were never really spent or let a code be spent twice.
-
-### 3.7 Coupon or festival discount, not both
-
-The festival discount and a coupon never apply to the same order (D2). Checkout works out both and uses whichever saves more:
-
-```
-autoSaving   = the festival discount on this cart (0 if it's switched off, or the cart is under ₹200)
-couponSaving = the coupon's discount on the items + any delivery fee it removes
-use the coupon  if  couponSaving > autoSaving
-                    (a tie keeps the festival discount and doesn't spend the coupon)
-```
-
-A coupon that loses isn't spent: a personal code stays in "My coupons" for a bigger order. The customer is told why: *"Your festival discount saves ₹33, more than FREEDEL's ₹20, so we've kept it."*
-
-The server doesn't make this choice. If `place_order` receives a code, it applies the coupon and sets the festival discount to 0 for that order. It never adds the two together.
-
-When the festival discount is on, a coupon only costs the difference between the two. On an order that would have got ₹33 off anyway, a ₹50 coupon costs RedLotus ₹17 more, not ₹50. Each coupon order stores the festival discount it replaced (`orders.auto_discount_forgone`), so the reports show both the full cost and this extra cost (§5.12).
-
-### 3.8 What a coupon never touches
-
-- **The platform fee.** Migration 022 says it's never waived by anything.
-- **The surge fee.**
-- **Commission.** It's still `commission_percent` × the item total before any discount.
-- **The restaurant's payout.** It's still the item total minus commission (D1).
-- **Menu prices on the order.** `order_items.unit_price` still stores the list price.
-- **The free-delivery waiver.** It's still judged on the item total before any discount, so a coupon can't push an order below ₹199 and lose it free delivery.
-
-### 3.9 The Boundedness Invariant
-
-The biggest money risk is a mistyped coupon, or one with no limit: a public code on WhatsApp can reach the whole town in an hour. So the database refuses to save one:
-
-- **Every shareable coupon has a limit on total spend.** `public` and `referral` coupons must have a `total_limit` or a `budget_rupees` (CHECK). Batch and personal coupons are already limited by how many codes exist.
-- **No order gets more than ₹500 off from one coupon** (D12, a CHECK on `max_discount` / `discount_value`).
-- **Food is never free** (§3.3).
-- **Every percentage coupon has a cap** (CHECK).
-
----
-
-## 4. Worked examples
-
-These use the seed `delivery_config`, which production ran on at the 022 cutover:
-- ₹20 base covering 1.5 km, then ₹10/km up to 5 km;
-- a ₹5 platform fee;
-- free delivery at ₹199 or more within 1.5 km.
-
-They also assume a 12% commission (recorded for every active partner on 2026-09-17) and the festival discount at its seed values, switched on: 11% up to ₹50 on ₹200 or more. Rider cost is the `order_delivery_margin` estimate: distance × 2 × ₹3.5.
-
-**RedLotus keeps** = commission + delivery fee + platform fee + surge − discount − rider cost.
-
-| # | Cart | Coupon | Festival discount | Used | Customer pays | RedLotus keeps |
-|---|---|---|---|---|---|---|
-| **A** | ₹300, 2.5 km | none | ₹33 | festival | 300 − 33 + 30 + 5 = **₹302** | 36 + 30 + 5 − 33 − 17.50 = **₹20.50** |
-| **B** | ₹300, 2.5 km | `DIWALI50`: ₹50 off above ₹249 | ₹33 | coupon (50 > 33) | 300 − 50 + 30 + 5 = **₹285** | 36 + 30 + 5 − 50 − 17.50 = **₹3.50** |
-| **C** | ₹300, 2.5 km | `FREEDEL`: free delivery above ₹149 | ₹33 | festival (30 < 33); the coupon isn't spent | **₹302** | **₹20.50** |
-| **D** | ₹180, 1.2 km | `FREEDEL` | ₹0 (under ₹200) | coupon (20 > 0) | 180 − 20 + 20 + 5 = **₹185** | 21.60 + 20 + 5 − 20 − 8.40 = **₹18.20** |
-| **E** | ₹200, 2 km, first order | `WELCOME50`: ₹50 off above ₹199 | ₹22 | coupon (50 > 22) | 200 − 50 + 25 + 5 = **₹180** | 24 + 25 + 5 − 50 − 14 = **−₹10** |
-| **F** | ₹400, 2 km | `FEAST20`: 20% up to ₹60 above ₹299 | ₹44 | coupon (60 > 44) | 400 − 60 + 25 + 5 = **₹370** | 48 + 25 + 5 − 60 − 14 = **₹4** |
-
-What these show:
-
-- **Stacking would lose money on every order.** If B stacked the coupon on the festival discount, RedLotus would keep 36 + 30 + 5 − 83 − 17.50 = **−₹29.50**. That's why D2 says one or the other.
-- **A ₹50 coupon costs roughly what RedLotus earns on one order.** It pays for itself when it produces an order that wouldn't have happened otherwise: a first order (E), a lapsed customer coming back, or a second order after a bad first one. That's why the automatic codes (§6) target exactly those moments, and why public codes have budgets.
-- **Count only the extra cost.** In B the coupon cost ₹17 more than the festival discount would have, not ₹50.
-- **Example D's stored order:** `delivery_fee` 20, `discount_amount` 20, `coupon_delivery_waiver` 20. The owner still sees "Order value ₹180" (§5.2, §5.10).
-
----
-
-## 5. Architecture (Phase 1)
-
-### 5.1 Tables
-
-```sql
-CREATE SCHEMA private;   -- not exposed through the API (§9.1)
-
-CREATE TABLE public.coupons (
-  id                 uuid          PRIMARY KEY DEFAULT gen_random_uuid(),
-  slug               text          NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9_]{3,40}$'),  -- Ankit's own name for it: 'diwali_2026'
-  kind               text          NOT NULL CHECK (kind IN ('public','batch','personal','referral')),
-
-  -- What the customer sees
-  title              text          NOT NULL CHECK (length(title) BETWEEN 3 AND 60),  -- '₹50 off this Diwali'
-  description        text          CHECK (length(description) <= 160),               -- the conditions line
-  show_in_offers     boolean       NOT NULL DEFAULT false,   -- listed at checkout and on /coupons (public only)
-
-  -- What it gives (§3.3)
-  discount_type      text          NOT NULL CHECK (discount_type IN ('percent','flat','free_delivery')),
-  discount_value     numeric(10,2),
-  max_discount       numeric(10,2),
-  min_subtotal       numeric(10,2) NOT NULL DEFAULT 0 CHECK (min_subtotal >= 0),
-
-  -- When (§3.4), checked in IST
-  active             boolean       NOT NULL DEFAULT true,
-  starts_at          timestamptz,
-  ends_at            timestamptz,
-  active_days        int[]         NOT NULL DEFAULT '{}' CHECK (active_days <@ ARRAY[0,1,2,3,4,5,6]),
-  daily_start        time,
-  daily_end          time,
-
-  -- Who and where (§3.5)
-  audience           text          NOT NULL DEFAULT 'everyone'
-                                   CHECK (audience IN ('everyone','new_customers','returning_customers')),
-  restaurant_ids     uuid[],                                   -- NULL = every restaurant
-
-  -- How many (§3.6)
-  per_customer_limit int           NOT NULL DEFAULT 1 CHECK (per_customer_limit >= 1),
-  total_limit        int           CHECK (total_limit >= 1),
-  budget_rupees      numeric(10,2) CHECK (budget_rupees > 0),
-  valid_days         int           CHECK (valid_days BETWEEN 1 AND 365),  -- personal codes expire this many days after issue
-
-  internal_note      text,
-  created_at         timestamptz   NOT NULL DEFAULT now(),
-  updated_at         timestamptz   NOT NULL DEFAULT now(),
-
-  -- The shape of each discount type (§3.3)
-  CONSTRAINT coupons_percent_shape CHECK (discount_type <> 'percent' OR (
-    discount_value BETWEEN 1 AND 100 AND max_discount IS NOT NULL AND max_discount < min_subtotal)),
-  CONSTRAINT coupons_flat_shape CHECK (discount_type <> 'flat' OR (
-    discount_value > 0 AND max_discount IS NULL AND discount_value < min_subtotal)),
-  CONSTRAINT coupons_free_delivery_shape CHECK (discount_type <> 'free_delivery' OR (
-    discount_value IS NULL AND (max_discount IS NULL OR max_discount > 0))),
-  CONSTRAINT coupons_whole_rupees CHECK (
-    (max_discount IS NULL OR max_discount = round(max_discount))
-    AND (discount_type <> 'flat' OR discount_value = round(discount_value))),
-  -- D12: no coupon takes more than ₹500 off one order (a guard against typos)
-  CONSTRAINT coupons_ceiling CHECK (
-    coalesce(max_discount, CASE WHEN discount_type = 'flat' THEN discount_value END, 0) <= 500),
-  -- §3.9: every shareable coupon has a limit on total spend
-  CONSTRAINT coupons_bounded CHECK (
-    kind NOT IN ('public','referral') OR total_limit IS NOT NULL OR budget_rupees IS NOT NULL),
-  CONSTRAINT coupons_offers_public_only CHECK (NOT show_in_offers OR kind = 'public'),
-  CONSTRAINT coupons_referral_new_only  CHECK (kind <> 'referral' OR audience = 'new_customers'),
-  CONSTRAINT coupons_personal_expiry    CHECK (kind <> 'personal' OR valid_days IS NOT NULL),
-  CONSTRAINT coupons_window CHECK (starts_at IS NULL OR ends_at IS NULL OR starts_at < ends_at),
-  CONSTRAINT coupons_daily_window CHECK (
-    (daily_start IS NULL AND daily_end IS NULL)
-    OR (daily_start IS NOT NULL AND daily_end IS NOT NULL AND daily_start <> daily_end))
-);
-
-CREATE TABLE public.coupon_codes (
-  id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-  coupon_id       uuid        NOT NULL REFERENCES public.coupons(id) ON DELETE RESTRICT,
-  code            text        NOT NULL UNIQUE CHECK (code ~ '^[A-Z0-9]{4,16}$'),
-  assigned_to     uuid        REFERENCES public.users(id),   -- personal: the only customer who can use it
-  referrer_id     uuid        REFERENCES public.users(id),   -- referral: the customer who gets the reward
-  max_uses        int         CHECK (max_uses >= 1),          -- NULL = the coupon's limits decide
-  expires_at      timestamptz,                                -- NULL = the coupon's ends_at decides
-  issued_reason   text        NOT NULL DEFAULT 'manual' CHECK (issued_reason IN
-                    ('manual','batch','apology','first_order_thanks','every_nth_order',
-                     'winback','referral','referral_reward')),
-  source_order_id uuid        REFERENCES public.orders(id),  -- the order that triggered an automatic code
-  note            text,                                       -- why Ankit issued it by hand
-  revoked_at      timestamptz,
-  created_at      timestamptz NOT NULL DEFAULT now(),
-  CHECK (assigned_to IS NULL OR referrer_id IS NULL)
-);
-
-CREATE INDEX idx_coupon_codes_assigned
-  ON public.coupon_codes (assigned_to) WHERE assigned_to IS NOT NULL;
-CREATE UNIQUE INDEX uq_coupon_codes_referrer              -- one live referral code per customer
-  ON public.coupon_codes (referrer_id) WHERE referrer_id IS NOT NULL AND revoked_at IS NULL;
-CREATE UNIQUE INDEX uq_coupon_codes_source                -- at most one automatic code per order per reason
-  ON public.coupon_codes (source_order_id, issued_reason) WHERE source_order_id IS NOT NULL;
-
-CREATE TABLE public.coupon_lookups (                      -- the guessing limiter + "previewed" record (§9.3)
-  user_id      uuid        NOT NULL,
-  code_id      uuid        REFERENCES public.coupon_codes(id),   -- NULL when nothing the caller may use was found
-  found        boolean     NOT NULL,
-  looked_up_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_coupon_lookups ON public.coupon_lookups (user_id, looked_up_at DESC);
-```
-
-**Codes are stored in a standard form**: uppercase A–Z and 0–9 only. What the customer types is converted the same way, ignoring spaces, hyphens and case, so `diwali-50` finds `DIWALI50`. Generated codes use a 31-character alphabet, `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, which leaves out 0/O and 1/I/L so the codes are easy to read off a flyer.
-
-**The kind rules (§3.2)** are enforced by a `BEFORE INSERT OR UPDATE` trigger on `coupon_codes`:
-
-| Coupon kind | `assigned_to` | `referrer_id` | `max_uses` | `expires_at` |
-|---|---|---|---|---|
-| public | NULL | NULL | any | any |
-| batch | NULL | NULL | **1** | any |
-| personal | **set** | NULL | **1** | **set** |
-| referral | NULL | **set** | any | any |
-
-A `BEFORE UPDATE` trigger on `coupons` refuses a change of `kind`. Everything else on a coupon can be edited while it's live; §5.11 explains what an edit does to a customer who is in the middle of checkout.
-
-`coupons` reuses `set_updated_at()` (003). None of these tables is added to Realtime, because every order reads the coupon row again anyway.
-
-**Grants, for all three tables:** RLS on, **no policies**, `REVOKE ALL FROM anon, authenticated`, and an explicit `GRANT ALL TO service_role` (the 023 rule: branch databases grant nothing by default). No client can read or write them directly (§9.1).
-
-### 5.2 The order snapshot, and why the coupon's value goes in `discount_amount`
-
-```sql
-ALTER TABLE public.orders
-  ADD COLUMN coupon_id              uuid          REFERENCES public.coupons(id),
-  ADD COLUMN coupon_code_id         uuid          REFERENCES public.coupon_codes(id),
-  ADD COLUMN coupon_code            text,              -- the code as shown on receipts: 'DIWALI50'
-  ADD COLUMN coupon_delivery_waiver numeric(10,2) NOT NULL DEFAULT 0 CHECK (coupon_delivery_waiver >= 0),
-  ADD COLUMN auto_discount_forgone  numeric(10,2) NOT NULL DEFAULT 0 CHECK (auto_discount_forgone >= 0),
-  ADD CONSTRAINT orders_coupon_all_or_nothing CHECK (
-    (coupon_id IS NULL) = (coupon_code_id IS NULL) AND (coupon_id IS NULL) = (coupon_code IS NULL)),
-  ADD CONSTRAINT orders_coupon_waiver_in_discount CHECK (
-    coupon_delivery_waiver <= discount_amount AND coupon_delivery_waiver <= delivery_fee),
-  ADD CONSTRAINT orders_coupon_extras_need_coupon CHECK (
-    coupon_id IS NOT NULL OR (coupon_delivery_waiver = 0 AND auto_discount_forgone = 0));
-
-CREATE INDEX idx_orders_coupon      ON public.orders (coupon_id)      WHERE coupon_id IS NOT NULL;
-CREATE INDEX idx_orders_coupon_code ON public.orders (coupon_code_id) WHERE coupon_code_id IS NOT NULL;
-CREATE INDEX idx_orders_customer_phone10
-  ON public.orders (right(regexp_replace(customer_phone, '\D', '', 'g'), 10));
-```
-
-**The rule: the whole value of an order's coupon goes into the existing `orders.discount_amount`.** That includes both the discount on the items and any delivery fee the coupon removes. `coupon_delivery_waiver` records how much of that was delivery, for receipts and the delivery margin report. It isn't used in any formula.
-
-Why not a separate column that the total subtracts? Because four places already work backwards from the stored money fields with exactly this formula:
-
-```
-item total = total_amount + discount_amount − delivery_fee − platform_fee − surge_fee
-```
-
-The four places are:
-- `menuValue()` in `src/pages/dashboard/utils.ts`: the owner's "Order value" on every order card and in history.
-- `orderValueLabel()` in `supabase/functions/send-push/index.ts`: the owner's new-order notification.
-- The "Item total" row on `OrderStatus.tsx` and `OrderHistory.tsx`.
-- `recalculate_order_total()` (022), which is the same formula solved for `total_amount`.
-
-If the removed delivery fee were stored anywhere else, all four would quietly show the wrong number on free-delivery orders. In example D the owner would see "Order value ₹160" for a ₹180 order. Putting it in `discount_amount` keeps all four exact **with no code change**. It also keeps `delivery_fee` equal to the priced fee, so every fee can still be recalculated from `delivery_config_history[version]`, as 022 requires.
-
-Because a coupon and the festival discount are never combined (§3.7), `discount_amount` on a coupon order holds only the coupon. On every other order it holds the festival discount, exactly as it does today.
-
-The existing table-level SELECT grant on `orders` covers the new columns: customers see their own orders, owners see their restaurant's. No client can write them. After 025, clients can't INSERT into `orders` at all, and owners can only UPDATE `status`, `eta_minutes` and `decline_reason`. `place_order` (SECURITY DEFINER) is the only thing that writes them.
-
-### 5.3 The eligibility check: one function, three callers
-
-`private.coupon_check(code, caller, restaurant, now)` returns a status, along with the coupon and code rows. `preview_coupon`, `list_offers` and `place_order` all call it, so they can't disagree. The checks run in this order and stop at the first failure:
-
-| # | Status | When |
-|---|---|---|
-| 1 | `not_found` | there's no such code, or the code has been revoked |
-| 2 | `not_eligible` | the caller isn't a `customer`, owns the restaurant, or shares a phone with the restaurant or its owner (026) |
-| 3 | `not_yours` | it's a personal code issued to someone else |
-| 4 | `own_referral` | it's the caller's own referral code (matched by account or phone) |
-| 5 | `unavailable` | `coupons.active = false` |
-| 6 | `not_started` | it's before `starts_at` |
-| 7 | `expired` | it's past `ends_at` or the code's `expires_at` |
-| 8 | `wrong_time` | it's outside `active_days` or `daily_start`–`daily_end` |
-| 9 | `wrong_restaurant` | the restaurant isn't in `restaurant_ids` (skipped when no restaurant is given) |
-| 10 | `new_customers_only` / `returning_only` | the audience rule fails (D10) |
-| 11 | `used` | the code's `max_uses`, or this customer's `per_customer_limit`, is already taken by live orders |
-| 12 | `sold_out` | `total_limit` has been reached, or `budget_rupees` has been spent, by live orders |
-| — | `ok` | none of the above |
-
-Two conditions depend on the cart rather than the coupon. `place_order` checks them after this function, and the client checks them for display:
-- `min_subtotal`: the item total is too low.
-- `no_saving`: it's a free-delivery coupon, but delivery on this order is already free.
-
-`place_order` also checks that this order's discount fits within what's left of the budget.
-
-In checks 10 and 11, "this customer" means orders where `customer_id` is the caller **or** `customer_phone` (last 10 digits) matches the caller's phone. `delete-account` scrubs an order's address, pin and instructions but keeps the `customer_phone` snapshot. So a customer who deletes their account and signs up again doesn't get a fresh coupon history.
-
-**Dependency:** if `delete-account` ever starts scrubbing `orders.customer_phone`, it must keep a hashed copy for this check (§13).
-
-### 5.4 `place_order` v5
-
-v5 adds two optional arguments, for 13 in total. It follows the same rule as every earlier version: DROP the 11-argument overload first, so an old bundle can't reach an old body. An old client's 11-key call still resolves to v5 through the `DEFAULT NULL`s and places a normal order.
-
-```
-p_coupon_code      text    DEFAULT NULL   -- the code as typed; NULL = no coupon
-p_delivery_waiver  numeric DEFAULT NULL   -- the client's figure for the delivery fee the coupon removes (±₹1, like the fee)
-```
-
-`p_discount` keeps its meaning: the discount on the items that the client showed. That's now either the festival discount or the coupon's.
-
-Without a coupon, v5 does exactly what v4 does, apart from writing the new columns' defaults. With one, the v4 steps change like this:
-
-| v4 step | What v5 adds |
+| A location-first header | The lotus mark, then "Your location ▾" and the locality, on warm white |
+| Circular category thumbnails | A warm ring around each circle. Local dishes (Thali, Dal Baati) lead, in admin order. |
+| Restaurant feed cards | The existing image slideshow, a gold star, a distance chip, and an offer badge with a **ticket notch**: the coupon-ticket motif used as a brand device |
+| An ADD button overlapping the dish photo | A brand-outlined ADD that becomes a lotus-red stepper |
+| A floating cart bar | A brand-red bar showing the item count and item total |
+| The bill summary | A receipt card with a ticket edge, the same motif again |
+| The order tracker | A vertical stepper. The live step is green with a soft pulse (none under reduced motion). |
+| Green rating badges | A gold star and the number (D16) |
+| A white or grey canvas | A warm off-white page (`#FDF8F6`) under white surfaces |
+| A neutral system font | Plus Jakarta Sans for the UI, DM Serif Display for the wordmark and editorial moments (D8) |
+
+### 4.3 Imagery, icons, voice and formats
+
+**Imagery**
+
+- Restaurant photos are uploaded at 4:3 (`design.md`). The feed card can show them at 16:9 (denser: about 2.3 cards per screen at 360 px instead of about 1.8) or at 4:3 (no cropping). **Decide in Figma with real photos in Phase 4**; the ratio is a single token in code.
+- Dish photos render square at 96–112 px. Owner uploads are already compressed below 115 KB.
+- Placeholders are a sunken neutral surface with the lotus mark at about 20 % opacity. **Never** stock food photos.
+- Promo media is 16:9: what `PromoCarousel` renders today. The "1:1" wording in `models.ts` and migration 017 is stale. Admins should upload at 1280 × 720 and keep text inside the central 80 %.
+- Category thumbnails are 1:1 circles. The emoji fallback stays for categories without an image.
+
+**Icons**
+
+- `lucide-react` only. Stroke 2 at 16–24 px; stroke 1.5 for decorative icons of 32 px and up.
+- No emoji in UI chrome. The category fallback is the one exception.
+
+**Voice.** Sentence case, short, warm and specific. Examples:
+
+| Today | Redesign |
 |---|---|
-| (a) read the caller's profile | If a code was sent, read the profile row `FOR UPDATE`, along with the caller's role. This makes one customer's coupon orders run one at a time, so two "first orders" can't get through at once. |
-| (d) festival discount | Unchanged. Its value is saved as `auto_discount_forgone` if a coupon wins. |
-| (g) radius check | **(g2)** Find the code. The caller must have previewed it in the last 24 hours (a `coupon_lookups` row); if not, raise `COUPON_INVALID: not_found` (§9.3). Lock the coupon row `FOR UPDATE`, *then* run `coupon_check`. Running the check after taking the lock means its counts include every order committed before this one. Unless the result is `ok`, raise `COUPON_INVALID: <status>`. Check `min_subtotal`, then work out the discount on the items. The festival discount for this order becomes 0. |
-| (h) subtotal and discount checks (±₹0.01) | Unchanged. `p_discount` is now compared with the coupon's discount on the items. |
-| (i) delivery fee (±₹1) | **(i2)** Work out how much delivery fee the coupon removes, from the *server's* fee, and compare it with `p_delivery_waiver` (±₹1). Raise `COUPON_INVALID: no_saving` if the coupon saves nothing in total. Raise `COUPON_INVALID: sold_out` if this order would go over the remaining budget. |
-| (k) insert | Write `discount_amount` = item discount + removed delivery fee, plus `coupon_id`, `coupon_code_id`, `coupon_code`, `coupon_delivery_waiver` and `auto_discount_forgone`. |
-| (l) commission | Unchanged: `commission_percent` × the item total before any discount. |
+| "View Cart →" | "View cart" |
+| "Back to Restaurants" | A back-arrow icon button labelled "Back" |
+| "out for delivery" (raw enum) | "On the way" |
+| "Loading menu…" | A skeleton |
+| "Something went wrong. Not found." (restaurant) | "This kitchen isn't taking orders right now." |
 
-**Locks are always taken in the same order**: `delivery_config` (FOR SHARE, already in v4), then the customer's `users` row, then the `coupons` row. That way two coupon orders can't deadlock. The coupon lock is held for the few milliseconds of one `place_order`, so even a Diwali rush won't queue up on it. v5 also pins `search_path = ''`, the hardening 026 added, and names every table with its schema.
+The full status sentences in `OrderStatus` (`STATUS_MESSAGES`) stay as they are; §8.5 adds short labels beside them.
 
-**Error contract.** This is a new stable prefix, matched in the same way as `PRICING_MISMATCH:`:
+**Formats** (one helper each, in `src/lib/format.ts`)
+
+- Money: ₹180, ₹180.50 (`formatRupees`; the same output as today's `formatPrice`).
+- Distance: 350 m, 1.2 km.
+- Time (IST): 7:45 PM.
+- Date and time: 19 Jul, 10:59 PM.
+
+---
+
+## 5. Design system: tokens
+
+### 5.1 Architecture
+
+- **Three new files** under `src/styles/`, imported once in `main.tsx` before `index.css`:
+  - `tokens.css`: CSS custom properties only (Appendix A);
+  - `base.css`: element defaults (page background, font, `:focus-visible` ring, tabular numerals, `color-scheme: light`, the global reduced-motion rule);
+  - `motion.css`: the shared keyframes (`rl-spin`, `rl-shimmer`, `rl-fade-in`, `rl-sheet-up`, `rl-pop`, `rl-pulse`).
+- **Name parity with Figma.** CSS name = `--rl-` + the Figma variable path with `/` replaced by `-`. So `color/brand/primary` is `--rl-color-brand-primary`. Every Figma variable's WEB code syntax is `var(--rl-…)`, which makes `get_design_context` emit our real tokens.
+- **Light only.** Figma uses a single mode called "Light". Dark mode later means a second mode plus a `[data-theme="dark"]` block. Note: the Android `AppTheme.NoActionBar` is a DayNight theme, so on a phone in dark mode the WebView may report `prefers-color-scheme: dark`. **Never add `prefers-color-scheme` rules casually**; `base.css` declares `color-scheme: light`.
+- **No big-bang migration.** Existing component CSS is left alone until its phase rewrites that screen. New code uses only tokens; a stylelint-style grep check in review rejects raw hex in new files.
+
+### 5.2 Colour
+
+Values are consolidated from today's CSS (use counts in brackets). Contrast ratios were computed with the WCAG formula; re-check them with a contrast tool in Phase 1.
+
+| CSS token | Figma variable | Value | From today | Use | Contrast |
+|---|---|---|---|---|---|
+| `--rl-color-brand-primary` | `color/brand/primary` | `#D63031` | `red` (168) | Primary buttons, active tab, ADD, links, focus ring | 4.9:1 on white, 4.6:1 on page; white text on it 4.9:1 |
+| `--rl-color-brand-pressed` | `color/brand/pressed` | `#B71C1C` | `redDark` (55) | Pressed and hover; text on brand-soft | 5.8:1 on brand-soft |
+| `--rl-color-brand-soft` | `color/brand/soft` | `#FDECEA` | (19) | Selected chips, offer strips, soft badges | n/a |
+| `--rl-color-brand-border` | `color/brand/border` | `#F5C2C2` | (8) | Borders on brand-soft surfaces | decorative |
+| `--rl-color-text-on-brand` | `color/text/on-brand` | `#FFFFFF` | | Text and icons on brand | 4.9:1 |
+| `--rl-color-text-primary` | `color/text/primary` | `#1A1A1A` | `charcoal` (212) | Headings, body | 17:1 |
+| `--rl-color-text-secondary` | `color/text/secondary` | `#4A4A4A` | `slate` (175) | Supporting text | 8.9:1 |
+| `--rl-color-text-tertiary` | `color/text/tertiary` | `#6F665E` | **new**: replaces `#8a8178`, `#9a9189` and `#9ca3af` wherever they colour text | Meta text: distance, timestamps, hints | 5.6:1 on white, 5.3:1 on page |
+| `--rl-color-text-disabled` | `color/text/disabled` | `#9A9189` | (9) | Disabled labels only | exempt |
+| `--rl-color-bg-page` | `color/bg/page` | `#FDF8F6` | `warmBg` (33) | Page canvas | |
+| `--rl-color-bg-surface` | `color/bg/surface` | `#FFFFFF` | (247) | Cards, bars, sheets | |
+| `--rl-color-bg-sunken` | `color/bg/sunken` | `#F1ECE7` | (7) | Image placeholders, skeleton base, input fill | |
+| `--rl-color-bg-scrim` | `color/bg/scrim` | `rgba(26,26,26,.4)` | (6) | Behind sheets and dialogs | |
+| `--rl-color-border-default` | `color/border/default` | `#E8E2DC` | `border` (134) | Card borders, dividers | decorative |
+| `--rl-color-border-subtle` | `color/border/subtle` | `#F0EBE5` | (10) | Row separators | decorative |
+| `--rl-color-border-strong` | `color/border/strong` | `#8A8178` | (7) | Input, radio and stepper outlines | 3.8:1 on white, 3.6:1 on page (UI parts need ≥ 3:1) |
+| `--rl-color-success` | `color/status/success` | `#1F7A3A` | (12) | Success text and icons, the live tracker step, "You save" | 5.4:1 |
+| `--rl-color-success-soft` | `color/status/success-soft` | `#EAFCE8` | (2) | Success backgrounds | success text on it 5.0:1 |
+| `--rl-color-warning` | `color/status/warning` | `#8A5A00` | (11) | Pending text and icons | 5.9:1 |
+| `--rl-color-warning-soft` | `color/status/warning-soft` | `#FFF8EE` | (8) | Pending backgrounds | |
+| `--rl-color-warning-border` | `color/status/warning-border` | `#F3D68A` | (8) | Pending borders | |
+| `--rl-color-danger` | `color/status/danger` | `#C0392B` | `redAccent` (85) | Errors, destructive actions | 5.4:1 |
+| `--rl-color-danger-soft` | `color/status/danger-soft` | `#FEF2F2` | (6) | Error backgrounds | |
+| `--rl-color-danger-border` | `color/status/danger-border` | `#FECACA` | (6) | Error borders | |
+| `--rl-color-neutral-soft` | `color/status/neutral-soft` | `#F5F0ED` | (7) | Cancelled badge, neutral chips | |
+| `--rl-color-veg` | `color/food/veg` | `#1F7A3A` | (12) | Veg mark (D9) | 5.4:1 |
+| `--rl-color-nonveg` | `color/food/non-veg` | `#8B4513` | **new**: FSSAI brown (D9) | Non-veg mark | 7.1:1 |
+| `--rl-color-star` | `color/rating/star` | `#F5A623` | `starGold` (13) | Star glyph, always next to the number | decorative |
+
+**Retired for text and marks:** `#E74C3C` (non-veg red / error), `#2ECC71` (veg green), `#F39C12` (pending), `#3498DB` (active) and `#27AE60` (success). All are below 3:1 on white. Blue leaves the customer palette entirely: live statuses become green, as the brief suggests. (The owner dashboard keeps its own colours; it is out of scope.)
+
+**Rules**
+
+- Text on `brand-soft` uses `brand-pressed`. Brand red on brand-soft is only 4.3:1.
+- At most one brand-filled button per screen region.
+- Error states never rely on hue alone: always an icon plus the soft background.
+- Shadows are neutral-tinted. The single brand-tinted shadow is reserved for the cart bar and the primary CTA.
+
+### 5.3 Typography
+
+| Token set (`--rl-type-*`) | Size / line height | Weight | Family | Use |
+|---|---|---|---|---|
+| `display` | 28 / 34 | 400 | DM Serif Display | The wordmark lock-up and rare editorial headings |
+| `title-lg` | 22 / 28 | 700 | Plus Jakarta Sans | Tab-screen titles; the restaurant name on its page |
+| `title-md` | 18 / 24 | 700 | Plus Jakarta Sans | Section headers |
+| `title-sm` | 16 / 22 | 700 | Plus Jakarta Sans | Card titles, dish names |
+| `body-lg` | 16 / 24 | 400 / 500 | Plus Jakarta Sans | Inputs (16 px stops iOS Safari zooming on focus), important body text |
+| `body-md` | 14 / 20 | 400 / 500 | Plus Jakarta Sans | Default body |
+| `body-sm` | 13 / 18 | 400 / 500 | Plus Jakarta Sans | Secondary text, dish descriptions |
+| `label-md` | 14 / 20 | 600 | Plus Jakarta Sans | Buttons, tabs |
+| `label-sm` | 12 / 16 | 600 | Plus Jakarta Sans | Chips, badges, bottom-nav labels |
+| `caption` | 12 / 16 | 400 / 500 | Plus Jakarta Sans | Meta text, timestamps |
+| `micro` | 11 / 14 | 600 | Plus Jakarta Sans | Overlines and badge text only, never body text |
+
+- Weights stay 400–700 (what is loaded today). No 800.
+- Prices, quantities and bill rows use `font-variant-numeric: tabular-nums`.
+- In Figma these are text styles named `Display`, `Title/LG`, `Title/MD`, `Title/SM`, `Body/LG`, `Body/MD`, `Body/SM`, `Label/MD`, `Label/SM`, `Caption` and `Micro`, with sizes bound to number variables.
+- **Text scaling.** The Android WebView typically applies the phone's font-size setting to page text. Layouts must survive 130 % text: no fixed heights on text containers, and test with the system font set to Large (§15.3).
+
+### 5.4 Space, layout and breakpoints
+
+| Group | Tokens |
+|---|---|
+| Space (4-point base, 8-point rhythm) | `--rl-space-0-5` 2 · `-1` 4 · `-2` 8 · `-3` 12 · `-4` 16 · `-5` 20 · `-6` 24 · `-8` 32 · `-10` 40 · `-12` 48 · `-16` 64 |
+| Gutters | `--rl-gutter` 16 px (< 768), 24 px (768–1023), 32 px (≥ 1024) |
+| Widths | `--rl-content-max` 1200 px (Home grid) · `--rl-reading-max` 720 px (single-column screens on desktop) |
+| Bars | `--rl-header-height` 56 · `--rl-bottomnav-height` 56 · `--rl-cartbar-height` 56 · `--rl-sticky-cta-height` 72 (all plus safe areas) |
+| Touch | `--rl-touch-min` 44 · `--rl-touch-nav` 48 |
+| Breakpoints | 480 / 768 / 1024 px, the same as today. CSS can't use variables inside media queries, so these are documented constants. |
+
+Design at **360 × 800** (the worst common Android width). Verify at 412 × 915, 768 × 1024 and 1280 × 800. Layouts must not scroll sideways at 320 px.
+
+### 5.5 Radius, borders and elevation
+
+| Token | Value | Use |
+|---|---|---|
+| `--rl-radius-xs` | 6 px | Badges, veg marks |
+| `--rl-radius-sm` | 8 px | Chips, small buttons, thumbnails |
+| `--rl-radius-md` | 12 px | Buttons, inputs, dish images, the cart bar |
+| `--rl-radius-lg` | 16 px | Cards |
+| `--rl-radius-xl` | 24 px | Sheet top corners, hero cards |
+| `--rl-radius-full` | 999 px | Pills, avatars, category circles |
+| `--rl-border-width` | 1 px | Everywhere. 1.5 px for veg marks and focus rings at 2 px. |
+| `--rl-shadow-1` | `0 1px 2px rgba(26,26,26,.06), 0 1px 3px rgba(26,26,26,.04)` | Resting cards |
+| `--rl-shadow-2` | `0 4px 12px rgba(26,26,26,.08)` | Sticky bars, menus, raised cards |
+| `--rl-shadow-3` | `0 12px 32px rgba(26,26,26,.16)` | Sheets and dialogs |
+| `--rl-shadow-brand` | `0 6px 16px rgba(214,48,49,.28)` | The cart bar and the primary CTA only |
+
+### 5.6 Motion
+
+| Token | Value |
+|---|---|
+| `--rl-duration-fast` | 120 ms (press feedback, small state changes) |
+| `--rl-duration-base` | 200 ms (fades, stepper morph, header colour) |
+| `--rl-duration-slow` | 320 ms (sheets, page transitions) |
+| `--rl-ease-standard` | `cubic-bezier(.2, 0, 0, 1)` |
+| `--rl-ease-decelerate` | `cubic-bezier(0, 0, 0, 1)` (entering) |
+| `--rl-ease-accelerate` | `cubic-bezier(.3, 0, 1, 1)` (leaving) |
+
+Under `prefers-reduced-motion: reduce`, durations drop to 0 ms and shimmer and pulse stop. The JavaScript slideshows (`RestaurantCardSlideshow`, `PromoCarousel`) already check reduced motion themselves.
+
+### 5.7 Layers and sizes
+
+| Token | Value | Layer |
+|---|---|---|
+| `--rl-z-sticky` | 20 | Sticky sub-headers (menu toolbar) |
+| `--rl-z-cartbar` | 30 | Cart bar, sticky CTA |
+| `--rl-z-bottomnav` | 40 | Bottom navigation |
+| `--rl-z-header` | 50 | App header |
+| `--rl-z-overlay` | 100 | Sheets, dialogs, the location disclosure |
+| `--rl-z-toast` | 200 | Toasts |
+| `--rl-z-offline` | 300 | The offline banner (as today) |
+| Icon sizes | 16 · 20 · 24 (32 · 40 for empty states) | |
+
+### 5.8 Migration rules
+
+1. Tokens land in Phase 1 with no visible change, except the page background and font smoothing in `base.css`; screenshot-check every customer screen.
+2. A screen moves to tokens only in the phase that redesigns it. Owner and marketing CSS are not touched.
+3. Raw hex, pixel radii and one-off shadows aren't allowed in new or rewritten CSS. Use tokens.
+4. Shared keyframes replace per-file copies when a file is rewritten. The 16 spinners become `rl-spin`.
+5. Any token change happens in `tokens.css` **and** the Figma variable in the same session, and is recorded in Appendix B's changelog.
+
+---
+
+## 6. Component architecture
+
+### 6.1 Folder layout
 
 ```
-COUPON_INVALID: <status>     status = any §5.3 status, or min_subtotal, no_saving, too_many_attempts
+src/
+  styles/        tokens.css · base.css · motion.css                 (NEW)
+  components/
+    ui/          primitives: Button, IconButton, Chip, Badge, VegMark, RatingPill,
+                 AddToCartControl, SearchField, Sheet, Dialog, Skeleton,
+                 EmptyState, InlineNotice, SectionHeader, ListRow,
+                 SegmentedControl, Avatar, Card                       (NEW)
+    shell/       CustomerShell, BottomNav, AppHeader, CartBar,
+                 StickyActionBar, ScrollManager                       (NEW)
+    restaurant/  RestaurantCard (+ skeleton), RestaurantHero, OfferStrip   (NEW)
+    menu/        DishRow (+ skeleton), MenuToolbar                     (NEW)
+    checkout/    BillDetails, CouponRow, AddressSection                (NEW)
+    orders/      OrderStatusHero, OrderStatusTracker, OrderCard        (NEW)
+    …existing    AddressPickerSheet, CouponTicket, StarRating, LocationDisclosure… (restyled)
+  context/       BrowseContext.tsx                                     (NEW, §7.9)
+  lib/           format.ts (+formatRupees, formatDistance) · orderStatus.ts · contact.ts ·
+                 billLines.ts · checkoutGate.ts · navVisibility.ts · backStack.ts ·
+                 recentSearches.ts · browseOrigin.ts                   (NEW or extended)
+  pages/         search/SearchPage.tsx · profile/SavedAddresses.tsx    (NEW)
 ```
 
-The server never quietly drops a coupon. The customer confirmed a total that included it, so if the coupon stopped working between the preview and the tap, that's an error, and the customer has to confirm the new total (§5.7).
+Conventions: each component has a co-located `.css` file (the repo's convention) with class prefix `rl-` for primitives (`.rl-btn`, `.rl-btn--primary`) and a component prefix for domain pieces (`.rcard__…`). There are no barrel files, there is no Tailwind and there is no new UI library.
 
-### 5.5 What the client can call
+### 6.2 Primitives
 
-**`preview_coupon(p_code text, p_restaurant_id uuid DEFAULT NULL) → jsonb`** — for signed-in users only. It converts the code to the standard form, runs `coupon_check`, records the lookup in `coupon_lookups`, and returns the status plus the rules the client needs to price the coupon:
+The **Figma name** column is the component's name in Figma, exactly. Variant properties in Figma use the React prop names.
 
-```json
-{
-  "status": "ok",
-  "code": "DIWALI50", "kind": "public",
-  "title": "₹50 off this Diwali", "description": "On orders above ₹249",
-  "discount_type": "flat", "discount_value": 50, "max_discount": null, "min_subtotal": 249,
-  "starts_at": "…", "ends_at": "…", "active_days": [], "daily_start": null, "daily_end": null,
-  "restaurant_ids": null, "restaurant_names": null,
-  "reserved_by_pending_order": false
+| Figma name | React | Variants / key props | Replaces today | Notes |
+|---|---|---|---|---|
+| `Button` | `ui/Button.tsx` | `variant` primary · secondary · tertiary · danger; `size` sm 36 · md 44 · lg 52; `loading`; `fullWidth`; `iconStart` / `iconEnd` | About 30 one-off button classes (`checkout__submit`, `rlist__empty-retry`, `cpage__use`…) | `loading` shows a spinner and sets `aria-busy`; the label stays for screen readers |
+| `IconButton` | `ui/IconButton.tsx` | `variant` plain · tonal · overlay (on images); `size` 40 · 44 | The close and back buttons in sheets and headers | `aria-label` is required by the TypeScript type |
+| `Chip` | `ui/Chip.tsx` | `selected`, leading icon, count | `rlist__vegchip`, text filter chips | `aria-pressed` |
+| `Badge` | `ui/Badge.tsx` | `tone` brand · success · warning · danger · neutral; `size` sm · md | `ohist__badge*`, `disc__featured-badge`, `cticket__tag` | Text plus colour, never colour alone |
+| `VegMark` | `ui/VegMark.tsx` | `kind` veg · nonveg; `size` 14 · 16 | Four separate veg-dot implementations | `role="img"` with "Vegetarian" or "Non-vegetarian". **Renders nothing when `is_veg` is unknown** (§18 F1). |
+| `RatingPill` | `ui/RatingPill.tsx` | `avg`, `count`, `size` | `disc__card-rating`, `rmenu__item-rating` | Uses `ratings.ts`; shows "New" when the count is 0 |
+| `AddToCartControl` | `ui/AddToCartControl.tsx` | `quantity` (0 shows ADD); `size` sm · md; `placement` inline · overlay; `disabled` | `rlist__dish-add` / `stepper`, `rmenu__add` / `stepper`, `checkout__stepper` | Calls the existing `addItem` / `updateQuantity`; going below 1 removes the item, as today. The hit area is ≥ 44 px even when the visual height is 32 px. |
+| `SearchField` | `ui/SearchField.tsx` | `mode` input · button; clear; `enterKeyHint="search"` | `rlist__search` | Button mode navigates to `/search` |
+| `Sheet` | `ui/Sheet.tsx` | `title`, `dismissible`, `initialFocusRef`, `busy` | The mechanics of `AddressPickerSheet` and `CouponSheet` | §6.5 |
+| `Dialog` | `ui/Dialog.tsx` | `title`, body, primary / secondary actions, `tone`, `busy`, `initialFocus` | The mechanics of `ConfirmOrderModal`, `CancelOrderModal`, `DeleteAccountModal` and both replace-cart modals | Default focus stays on the **safe** action, as today |
+| `Skeleton` | `ui/Skeleton.tsx` | `shape` rect · line · circle; size | `rlist__skeleton`, `checkout__skeleton` | `aria-hidden`; shimmer stops under reduced motion |
+| `EmptyState` | `ui/EmptyState.tsx` | `tone` neutral · error; icon, title, body, primary and secondary actions, WhatsApp link | `rlist__empty`, `ohist__empty`, `cpage__empty` | The error tone takes an already-humanised message (§9) |
+| `InlineNotice` | `ui/InlineNotice.tsx` | `tone` info · success · warning · danger; optional action | `checkout__pricing-error`, the coupon notices, `checkout__delivery-blocked` | `role="status"`, or `role="alert"` for danger |
+| `SectionHeader` | `ui/SectionHeader.tsx` | title, count, action ("See all") | `rlist__section-head`, `disc__grid-head` | |
+| `ListRow` | `ui/ListRow.tsx` | icon, title, subtitle, trailing (chevron · badge · check), link or button | `profile__link-card`, `apsheet__row` | Renders a real `<a>` or `<button>` |
+| `SegmentedControl` | `ui/SegmentedControl.tsx` | options, value | new (Search results tabs) | `role="tablist"` |
+| `Avatar` | `ui/Avatar.tsx` | initial; icon fallback | `topbar__avatar` | |
+| `Card` | `ui/Card.tsx` | padding sm · md; elevation 0 · 1 | Many card classes | |
+
+### 6.3 Shell components
+
+| Figma name | React | Purpose |
+|---|---|---|
+| `Shell/BottomNav` | `shell/BottomNav.tsx` | Five tabs (D1); `<nav aria-label="Main">`; `aria-current="page"`; hidden by the rules in §7.3 |
+| `Shell/AppHeader` | `shell/AppHeader.tsx` | `variant` home (logo, location, avatar) · stack (back, title, actions) · overlay (round icon buttons over the restaurant hero, turning solid on scroll). Replaces `AppTopBar` and, on customer screens, `Navbar`. |
+| `Shell/LocationSelector` | part of `AppHeader` | "Your location ▾" plus the label; opens the existing `AddressPickerSheet` |
+| `Shell/CartBar` | `shell/CartBar.tsx` | "N items · ₹X · View cart" (item total only), floating above the bottom nav on Home and Search and at the bottom on Restaurant; `aria-live="polite"` |
+| `Shell/StickyActionBar` | `shell/StickyActionBar.tsx` | The bottom CTA container: safe-area and keyboard aware |
+| none | `shell/ScrollManager.tsx` | Scroll to top on PUSH; restore on POP (§7.6) |
+| none | `shell/CustomerShell.tsx` | The layout route (§7.2) |
+
+### 6.4 Domain components
+
+| Figma name | React | Replaces | Notes |
+|---|---|---|---|
+| `Restaurant/Card` (variants feed · rail · result) | `restaurant/RestaurantCard.tsx` | `DiscoveryPage.renderCard`, the `FeaturedRail` card markup | Keeps `RestaurantCardSlideshow` and `getCardImages` (feed and rail) |
+| `Restaurant/Card skeleton` | `restaurant/RestaurantCardSkeleton.tsx` | `rlist__skeleton` | One per variant |
+| `Restaurant/Hero` | `restaurant/RestaurantHero.tsx` | `rmenu__hero` | Slideshow from `image_urls` |
+| `Offers/Strip`, `Offers/Chips` | `restaurant/OfferStrip.tsx` | `rlist__offer-strip`, `rmenu__offer-pill`, `rmenu__coupon-line` | The headline copy logic moves **verbatim** (it encodes Principle 1) |
+| `Discovery/PromoCarousel` | existing `PromoCarousel.tsx` | | Restyle only |
+| `Discovery/CategoryRail`, `Discovery/CategoryGrid` | existing `CategoryRail.tsx` + grid variant | | Chip taps navigate to `/search?c=slug` |
+| `Menu/DishRow` (variants menu · search; with or without image) | `menu/DishRow.tsx` | `rmenu__item`, `rlist__dish` | §8.3 has the spec |
+| `Menu/DishRow skeleton` | `menu/DishRowSkeleton.tsx` | "Loading menu…" | |
+| `Menu/Toolbar` | `menu/MenuToolbar.tsx` | none | In-menu search and the veg toggle; sticky |
+| `Coupon/Ticket` | existing `CouponTicket.tsx` | | API unchanged |
+| `Checkout/CouponRow` | `checkout/CouponRow.tsx` | `checkout__coupon` | Labels are computed exactly as today |
+| `Checkout/BillDetails` | `checkout/BillDetails.tsx` | The checkout lines, `cmodal__summary`, `orderst__breakdown`, `ohist__breakdown` | Takes `BillLine[]` from `lib/billLines.ts` (§8.4) |
+| `Checkout/AddressSection` | `checkout/AddressSection.tsx` | `checkout__saved`, `checkout__new-address` | Same state, same radio semantics |
+| `Orders/StatusHero` | `orders/OrderStatusHero.tsx` | `orderst__status-card`, `orderst__eta` | |
+| `Orders/Tracker` | `orders/OrderStatusTracker.tsx` | `orderst__progress` | |
+| `Orders/Card` | `orders/OrderCard.tsx` | `ohist__card` | |
+| `Auth/SignInPanel` | `components/SignInPanel.tsx` | new (D5) | "Log in" carries `?next=` once the OTP plan ships it |
+| `Profile/Header`, `Profile/AddressItem` | `profile/…` | `profile__form` header | |
+
+### 6.5 The overlay contract (Sheet and Dialog)
+
+All current overlays hand-copy the same mechanics. The primitives centralise them and add what's missing:
+
+| Concern | Rule |
+|---|---|
+| Structure | Portal into `document.body`; `role="dialog"`, `aria-modal="true"`, labelled by its title |
+| Focus | Moves to `initialFocusRef` (or the first focusable element), is **trapped** inside (new), and returns to the opener on close |
+| Closing | ESC, backdrop tap, the close button and **Android hardware back** (new, §7.5). All are ignored while `busy` (today's `placing` / `locating` / `applying` rules). |
+| Scroll lock | `body { overflow: hidden }` as today, with a nesting counter so a dialog over a sheet can't unlock the page early |
+| Layout | A Sheet is bottom-anchored below 768 px (grabber, `max-height: 88dvh`, scrolling body, safe-area padding) and a centred card at 768 px and up. A Dialog is always centred. |
+| Motion | The sheet slides up in 320 ms (decelerate); a dialog fades and scales from 0.96 in 200 ms; reduced motion means an instant fade |
+| Nesting | Avoid it. A two-step flow uses steps inside one Sheet. Only a Dialog may sit over a Sheet. |
+
+Each existing overlay keeps its own content and behaviour, including its default focus (for example, "Go back" in `ConfirmOrderModal` and "Keep my order" in `CancelOrderModal`).
+
+### 6.6 Shared helpers
+
+| File | What | Rule |
+|---|---|---|
+| `lib/format.ts` | `formatRupees` (the 9 `formatPrice` copies), `formatDistance` (2 copies), `formatClockIST`, `formatDateTimeIST`; `formatKm` stays | Output must be byte-identical to today's helpers; parity tests compare old and new on sample values |
+| `lib/orderStatus.ts` | Short label, tone and tracker step for each `order_status` | Presentation only; `STATUS_MESSAGES` sentences stay |
+| `lib/contact.ts` | WhatsApp numbers by purpose, support email, `waLink(number, message)` | Each surface keeps its current number until D17 is answered |
+| `lib/billLines.ts` | `billLinesFromPricing(p, labels)` (checkout) and `billLinesFromOrder(order)` (receipts) → `BillLine[]` | Pure and tested. Receipts render from the order snapshot, never live config. |
+| `lib/checkoutGate.ts` | `canPlaceOrder(inputs)`: today's `canPlace` expression moved **verbatim**; `checkoutBlocker(inputs)`: the first failing reason as copy | A test asserts `checkoutBlocker(x) === null` exactly when `canPlaceOrder(x)` (§8.4) |
+| `lib/navVisibility.ts` | `shouldShowBottomNav(pathname, role, isDesktop)` | §7.3 matrix as tests |
+| `lib/backStack.ts` | `pushBackHandler(fn)` → unregister; `runTopBackHandler()` | §7.5 |
+| `lib/recentSearches.ts` | read / add / clear, max 8, case-insensitive dedupe, newest first | `localStorage`, wrapped in try/catch like `couponStorage` |
+| `lib/browseOrigin.ts` | `decideFix(…)`: the pure decision table from `DiscoveryPage`'s `acceptFix` | §7.9 |
+
+---
+
+## 7. App shell and navigation
+
+### 7.1 Route map
+
+| Path | Today | After |
+|---|---|---|
+| `/` | `DiscoveryPage`, `AppTopBar`, search and category filter inline | Inside `CustomerShell`, **Home tab**. Search and categories open `/search`. Owner redirect kept. |
+| `/search` | none | **NEW**, **Search tab** (D2): `?q=` for the query, `?c=` for a category slug |
+| `/restaurants/:id` | `ProtectedRoute` + `Navbar` | Inside the shell, **public** (D4); overlay header; no tab bar |
+| `/checkout` | `ProtectedRoute role="customer" requirePhoneVerified` + `Navbar` | Same guard; stack header; sticky footer; no tab bar |
+| `/orders` | `ProtectedRoute` + `Navbar` | **Orders tab**; in-place sign-in panel when logged out (D5). While auth is still loading, show the skeleton, as `ProtectedRoute`'s loader does today. |
+| `/orders/:id` | `ProtectedRoute` + `Navbar` | Same guard; stack header |
+| `/orders/:id/review` | `ProtectedRoute requirePhoneVerified` + `Navbar` | Same guard; stack header; restyled |
+| `/coupons` | Public + `Navbar` | **Offers tab**. The path stays: `?apply=` links already exist in banners, pushes and shares. |
+| `/profile` | `ProtectedRoute` + `Navbar` | **Profile tab**; in-place sign-in panel when logged out (D5). `?setup=true` (the Google gate) still works, with the tab bar hidden. |
+| `/profile/addresses` | none | **NEW** (D11): `ProtectedRoute role="customer"`; stack header |
+| `/restaurants` | `Navigate` to `/` | Unchanged |
+| Auth, marketing, legal, `/verify-phone`, `/dashboard*` | | **Unchanged and outside the shell** |
+
+### 7.2 `CustomerShell`, a layout route
+
+```tsx
+// App.tsx (sketch). Paths are unchanged except the two new ones.
+<Route element={<CustomerShell />}>
+  <Route index element={<DiscoveryPage />} />
+  <Route path="search" element={<SearchPage />} />
+  <Route path="coupons" element={<CouponsPage />} />
+  <Route path="orders" element={<OrderHistory />} />
+  <Route path="profile" element={<Profile />} />
+  <Route path="restaurants/:id" element={<RestaurantMenu />} />
+  <Route path="checkout" element={<ProtectedRoute role="customer" requirePhoneVerified><Checkout /></ProtectedRoute>} />
+  <Route path="orders/:id" element={<ProtectedRoute><OrderStatus /></ProtectedRoute>} />
+  <Route path="orders/:id/review" element={<ProtectedRoute requirePhoneVerified><OrderReview /></ProtectedRoute>} />
+  <Route path="profile/addresses" element={<ProtectedRoute role="customer"><SavedAddresses /></ProtectedRoute>} />
+</Route>
+```
+
+```tsx
+// shell/CustomerShell.tsx (sketch)
+export default function CustomerShell() {
+  const { pathname } = useLocation();
+  const { profile } = useAuth();
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const showTabs = shouldShowBottomNav(pathname, profile?.role, isDesktop);
+  return (
+    <BrowseProvider>                {/* §7.9: starts GPS only when a screen asks */}
+      <ScrollManager />
+      <div className={`shell${showTabs ? " shell--tabs" : ""}`}>
+        <Outlet />
+      </div>
+      {showTabs && <BottomNav />}
+    </BrowseProvider>
+  );
 }
 ```
 
-- **A miss** (`not_found` or `not_yours`) returns only the status. After 10 misses in an hour, the function answers `too_many_attempts` without looking anything up.
-- **`reserved_by_pending_order`** is set when the status is `used` because a *pending* order is holding the use. Checkout can then say: "It's on your order that's waiting for the restaurant. It comes back if that order is declined or you cancel it."
-- **Housekeeping:** each call also deletes the caller's lookup rows older than two days.
+- `DiscoveryPage` stays the eager import. The shell is small and goes in the index chunk. Every other screen stays lazy.
+- Customers still never download the owner chunk.
 
-**`list_offers(p_restaurant_id uuid DEFAULT NULL) → jsonb`** — for everyone, signed in or not. It returns one array, with rows shaped like the preview above:
+### 7.3 When the bottom nav shows
 
-- **Public offers.** These are `show_in_offers` coupons that are active and haven't ended. Coupons that start within the next 7 days are included and shown as "Starts Fri". Each row carries the public code.
-  - For a signed-in customer, offers they can never use are **left out**: statuses `not_eligible`, `new_customers_only`, `returning_only`, `used` and `sold_out`. There's no point teasing them.
-  - Offers that are only locked for now stay in the list, shown as locked: `wrong_time` and `not_started`, and `wrong_restaurant` on `/coupons`.
-- **The customer's own codes**, if signed in: personal codes issued to them that haven't expired, been revoked or been used. Each carries `issued_reason` and `source_order_id`, for a subtitle such as "Sorry about your declined order".
-- A visitor who isn't signed in gets the public offers only.
+| Condition | Bottom nav |
+|---|---|
+| Viewport ≥ 1024 px | Hidden; the desktop header carries the links |
+| Role is `owner` | Hidden everywhere |
+| Path is `/`, `/search`, `/orders`, `/coupons` or `/profile` (without `?setup=true`) | **Shown** |
+| Any other path in the shell | Hidden (stack screens) |
+| On-screen keyboard open | Hidden (§7.7) |
 
-It never returns another customer's personal code, a batch code or a referral code. The only way to reach those is to type them.
+The tabs are ordinary `NavLink`s (history push), so the browser's back button works as people expect on the web. The cart bar stacks 8 px above the nav. The offline banner sits above both.
 
-Both functions are `SECURITY DEFINER` with `SET search_path = ''`, name every table with its schema, and grant `EXECUTE` to exactly the roles listed above.
+### 7.4 Headers
 
-### 5.6 `src/lib/coupons.ts` and `pricing.ts`
+| Variant | Used on | Contents |
+|---|---|---|
+| `home` | `/` | Lotus mark (tap scrolls to top) · LocationSelector · avatar or "Log in". Sticky. The search field sits under it and can dock into the header on scroll (optional; decide in Figma). |
+| `title` | `/search`, `/orders`, `/coupons`, `/profile` | Screen title (`title-lg`) and optional actions. On `/search` the title is the search input itself. |
+| `stack` | Checkout, order detail, review, saved addresses | Back (`IconButton`), a title that truncates, optional actions (for example "Help" on order detail) |
+| `overlay` | `/restaurants/:id` | Round back and search buttons over the hero. Past the hero it turns solid white and shows the restaurant name. |
 
-A new pure module is the client's copy of the SQL maths. It follows the same rule as `pricing.ts` and `delivery_fee_for()`: change one and you must change the other, and the tests pin both.
+### 7.5 Android hardware back
+
+Today `NativeBridge` calls `history.back()` everywhere except `/` and `/dashboard`, where it minimises the app. The new rules, in order:
+
+| Context | Back does |
+|---|---|
+| An overlay is open (Sheet, Dialog, the location disclosure) | Closes the top overlay through `runTopBackHandler()`. Ignored while it's busy. |
+| Stack screen with history | `history.back()` |
+| Stack screen opened cold from a push or App Link (no history) | Goes to its tab root: `/orders/:id` → `/orders`; `/restaurants/:id` → `/` |
+| Tab root other than Home | `navigate("/", { replace: true })` |
+| `/` or `/dashboard` | `minimizeApp()`, as today. Never `exitApp()`. |
+
+Implementation: `lib/backStack.ts` keeps a stack of handlers. `Sheet` and `Dialog` push one on mount. `NativeBridge` checks the stack before applying the route rules. The OAuth return, App Links, push taps, splash and Capgo `notifyAppReady()` code paths are untouched. Web back behaviour doesn't change.
+
+### 7.6 Scroll management
+
+`ScrollManager` uses `useNavigationType()`:
+
+- **PUSH**, or a **REPLACE** to a different path: scroll to the top.
+- **REPLACE on the same path** (updating `?q=` on `/search`, stripping `?apply=` on `/coupons`): keep the position.
+- **POP**: restore the position saved for that history entry (a `Map` keyed by `location.key`).
+
+Home renders from `BrowseProvider`'s cached data immediately (§7.9), so a restored position lands on real content.
+
+### 7.7 Safe areas, system bars and the keyboard
+
+- **Native Android.** `@capawesome/capacitor-android-edge-to-edge-support` turns the system-bar insets into WebView margins, so `env(safe-area-inset-*)` reads 0 and **content can never draw under the status bar**. The overlay header therefore starts below the status strip. Figma frames must show a solid status strip, not a photo underneath.
+- **System bar colours.** The plugin version in the binary (8.0.8) has `setStatusBarColor` and `setNavigationBarColor`. The shell sets the status strip to white (it sits against the white header) and the navigation strip to white when a bottom bar is visible, otherwise to the page colour. These are JavaScript calls, safe for OTA.
+- **Web and iOS PWA.** Keep `env(safe-area-inset-*)` padding on every fixed bar (the viewport meta already has `viewport-fit=cover`).
+- **Keyboard.** `@capacitor/keyboard` is compiled into the shipped binary but unused. Listen for its show and hide events to set `html[data-keyboard="open"]`; CSS then hides the bottom nav and sticky bars so they don't ride above the keyboard. On the web, use a `visualViewport` resize heuristic instead.
+- **Verify on Android 15 and 16** that the keyboard doesn't cover focused inputs under edge-to-edge (checkout address and notes, the coupon code box). If it does, the fix is `Keyboard.resizeOnFullScreen: true` in `capacitor.config.ts`. That is a **store build** (§16.3), because plugin configuration lives in the native assets, not in the OTA bundle.
+- Full-height layouts use `min-height: 100dvh` with a `100vh` fallback.
+
+### 7.8 Tablet and desktop
+
+- **768–1023 px:** the bottom nav stays; Home becomes a 2-column grid; single-column screens centre at `--rl-reading-max`.
+- **1024 px and up:** no bottom nav. The `home` header becomes one bar: logo · location · inline search field · Home / Orders / Offers / Profile links · cart button. Home becomes a 3-column grid; Checkout puts bill details in a right column that sticks; sheets become centred cards.
+- The web and PWA build gets the same redesign as the native app. Nothing is native-only except the back button, system bars and keyboard events.
+
+### 7.9 Browse state shared by Home, Search and Restaurant
+
+Today the geolocation engine, the restaurant fetch, the nearby filter, the listed-offers fetch and the lazy dish fetch all live inside `DiscoveryPage`. Search (D2) and the restaurant page's distance need them too, so they move into `BrowseProvider` (`src/context/BrowseContext.tsx`), mounted by `CustomerShell`:
 
 ```ts
-export type CouponRules = {
-  code: string;
-  kind: "public" | "batch" | "personal" | "referral";
-  title: string;
-  description: string | null;
-  discountType: "percent" | "flat" | "free_delivery";
-  discountValue: number | null;
-  maxDiscount: number | null;
-  minSubtotal: number;
-  startsAt: Date | null;
-  endsAt: Date | null;          // whichever comes first: the coupon's ends_at or the code's expires_at
-  activeDays: number[];         // IST, 0 = Sunday
-  dailyStart: string | null;    // 'HH:MM' IST
-  dailyEnd: string | null;
-  restaurantIds: string[] | null;
+type BrowseState = {
+  origin: Coords | null; originLabel: string | null; locationError: LocationError | null;
+  restaurants: RestaurantCard[]; restaurantsStatus: "loading" | "ready" | "error"; restaurantsError: string | null;
+  nearby: VisibleEntry[];        // today's `visible`: in each restaurant's own radius, distance-sorted
+  offers: CouponOffer[];         // list_offers(null), for the card offer lines
+  dishes: DishRow[]; dishesStatus: "idle" | "loading" | "loaded" | "error"; ensureDishes(): void;
+  retry(): void; override(): void; pick(coords: Coords, label: string | null): void;
 };
-
-isCouponLive(rules, now): boolean                  // mirrors private.coupon_is_live
-couponAmounts(rules, subtotal, deliveryFee):       // mirrors private.coupon_amounts
-  { itemDiscount: number; deliveryWaiver: number | null }   // waiver is null until the fee is known
-couponLockReason(...)                              // why a chosen coupon isn't in use, or null
-normaliseCode(input): string                       // mirrors the SQL version
 ```
 
-- **Data layer:** RPC calls, and turning `COUPON_INVALID:` errors into copy, live in `src/lib/couponsApi.ts`, following the `reviews.ts` pattern.
-- **Stored codes:** the chosen code and the pending code are kept by `src/lib/couponStorage.ts`, following the `locationCache.ts` pattern: an expiry time, a check on the stored shape, and try/catch around storage.
+**How the move is done**
 
-`computeCartPricing(subtotal, config, now, distanceKm, delivery, coupon = null)` gains the last argument, and `CartPricing` gains these fields:
+1. **A pure move first.** Cut the state, effects and handlers from `DiscoveryPage` into the provider **unchanged**: the same constants, options, refs and cancellation flags. Commit that on its own and verify there is no behaviour change.
+2. **Extract the decision table.** `acceptFix`'s decisions (escalate · inaccurate · keep cached within 500 m drift · accept) move into `lib/browseOrigin.ts` as a pure `decideFix()`, with unit tests for every row of `location_resilience_plan.md`'s edge-case table. The cache write stays in the hook, still first.
+3. **Start lazily.** The provider does nothing until a screen calls `useBrowse()` (Home, Search, Restaurant). `/orders`, `/profile` and `/coupons` therefore never trigger an OS location prompt, and `LocationDisclosure` still precedes the first prompt on native.
+4. **Keep data across screens.** The provider outlives route changes, so Restaurant → back → Home doesn't refetch. Restaurants are refetched when Home becomes visible and the last fetch is over 2 minutes old, and when the app resumes. (RLS hides closed kitchens, so a stale list could show one that just closed; the restaurant page handles that case, §8.3.)
 
-| Field | Meaning |
+**Invariants that must survive the move** (from `location_resilience_plan.md`, `customer_ui_revamp_plan.md` and CLAUDE.md)
+
+- Coarse first (`enableHighAccuracy: false`, 8 s, 5-minute `maximumAge`). Escalate to precise (15 s) only when the coarse fix is worse than 1,000 m, or when it fails and there is no cache.
+- Hydrate from the 24 h cache with zero spinner frames; a background refresh updates the origin only after more than 500 m of drift.
+- The five `LocationError` states keep distinct copy and actions: retry and override where they apply, WhatsApp-only for `denied` and `unsupported`. Never collapse them into one banner.
+- "Show restaurants anyway" seeds `VILLAGE_CENTRE` for the session only, with no cache write. A picker choice writes the cache with the 50 m synthetic accuracy.
+- Reverse geocoding happens at most once per distinct fix (Nominatim's 1 request/second policy). The cached label is adopted on a cached load.
+- A restaurant is shown only if `distance <= r.delivery_radius_km` (migration 021).
+- On native, the disclosure gate comes before any OS prompt; "Not now" leads to the retriable `unavailable` state.
+- Sign-out clears the coordinate cache, and now the recent searches too.
+- Owners are redirected to `/dashboard` from `/`.
+
+---
+
+## 8. Screen specifications
+
+Each screen lists its layout, behaviour, states, what must not change, and how to accept it. Wireframes are at 360 px.
+
+### 8.1 Home (`/`)
+
+```
+┌────────────────────────────────────┐
+│ ✿  Your location ▾          (A)    │  AppHeader/home
+│    Gudha Gorji                     │  (A) = avatar, or "Log in"
+│ ┌────────────────────────────────┐ │
+│ │ 🔍 Search dishes or restaurants│ │  SearchField (button → /search)
+│ └────────────────────────────────┘ │
+│ ┌────────────────────────────────┐ │
+│ │        PROMO (16:9)            │ │  PromoCarousel — hidden when none live
+│ └────────────────────────────────┘ │
+│               ● ○ ○                │
+│ What's on your mind?               │
+│  (◯)   (◯)   (◯)   (◯)   (◯)  →    │  CategoryRail → /search?c=slug
+│ Thali  Pizza Chinese Chaat Burger  │
+│ ┌────────────────────────────────┐ │
+│ │ % 11% OFF on ₹200+ · automatic │ │  OfferStrip (discount / delivery config)
+│ │   Free delivery on ₹199+ ≤1.5km│ │
+│ └────────────────────────────────┘ │
+│ Featured near you              →   │  FeaturedRail (is_featured ∩ nearby)
+│ ┌──────┐ ┌──────┐ ┌──────┐         │
+│ Top rated near you             →   │  TopRatedRail (D12), hides when sparse
+│ 16 restaurants near you            │
+│ ┌────────────────────────────────┐ │
+│ │ [ slideshow ]          1.2 km  │ │  Restaurant/Card feed
+│ │ ▸₹50 OFF above ₹199            │ │  ticket-notch offer badge
+│ │ Sharma Bhojnalaya      ★ 4.3   │ │
+│ │ Rajasthani, Thali              │ │
+│ └────────────────────────────────┘ │
+├────────────────────────────────────┤
+│ 🛒 2 items · ₹310       View cart  │  CartBar (only with items)
+├────────────────────────────────────┤
+│ Home  Search  Orders  Offers  Me   │  BottomNav (label for the 5th tab: "Profile")
+└────────────────────────────────────┘
+```
+
+**Behaviour**
+
+- The header's LocationSelector opens the existing `AddressPickerSheet` (GPS, saved addresses, "Browse all of Gudha Gorji"), restyled on `Sheet`.
+- Tapping the search field navigates to `/search` with focus. Tapping a category chip navigates to `/search?c=<slug>`. Home no longer filters in place.
+- **OfferStrip copy logic moves verbatim** from `DiscoveryPage` (`stripHeadline` / `stripSub`). The delivery half is omitted while `delivery_config` is null.
+- **Cards show only restaurant-specific coupon offers** (`bestOfferFor`). The festival discount applies everywhere, so it appears once, in the strip.
+- **Top rated rail (D12):** nearby restaurants with `rating_count >= 5`, sorted by average then count, at most 8; shown only when at least 3 qualify. The thresholds are constants in one file.
+- The list is 1 column on phones, 2 at 768 px and 3 at 1024 px. The first card's lead image is eager with `fetchpriority="high"` (the likely LCP element); the rest are lazy.
+- `InstallPrompt` (web only) and `LocationDisclosure` (native, first run) stay mounted here.
+
+**States**
+
+- **Loading:** header, search field, five category circles and three card skeletons.
+- **Location:** the five location states, "none in range", "all closed" and "couldn't load". The configs and copy are today's, rendered with `EmptyState`.
+- **Partial failure:** promos, categories and offers that fail to load simply hide, as today.
+
+**Must not change:** everything in §7.9's invariant list; the featured rail rules (flag ∩ nearby, rank order, hide when none); the owner redirect.
+
+**Acceptance**
+
+- A returning visitor with a cached fix sees the list with no spinner frame.
+- A first native run shows the disclosure before any OS prompt.
+- No section ever renders an empty box.
+- A category tap shows the same results today's inline filter would.
+- Lighthouse mobile LCP is no worse than the Phase 0 baseline.
+
+### 8.2 Search (`/search`, D2)
+
+```
+┌────────────────────────────────────┐
+│ ←  [🔍 paneer tikka         ✕ ]    │  title header = search input (autofocus)
+├────────────────────────────────────┤
+│ IDLE:  Recent searches     Clear   │  recentSearches (this device)
+│        ↺ biryani   ↺ pizza  …      │
+│        Explore categories          │  CategoryGrid (menu_categories)
+│        (◯) (◯) (◯) (◯) …           │
+├────────────────────────────────────┤
+│ TYPING (≥2 chars): suggestions     │  ≤ 6 rows: restaurant · cuisine · dish
+├────────────────────────────────────┤
+│ RESULTS: [ Dishes 12 | Restaurants 3 ]   SegmentedControl
+│ [All] [Veg] [Non-veg]              │  Chips (dishes tab)
+│ ▣ Paneer Tikka            [ ADD ]  │  Menu/DishRow (search variant)
+│   Punjab Dhaba · 1.4 km  ₹220      │  restaurant line links to its menu
+└────────────────────────────────────┘
+```
+
+- **Data.** Everything comes from `BrowseProvider`: nearby restaurants, plus dishes fetched lazily (`.in(nearbyIds)`) on first focus. That is today's query and scope, so dishes from other cities are never fetched.
+- **Matching** uses `search.ts` and `categoryMatch.ts` unchanged (token-AND within a query; OR across a category's keywords). The query is debounced by 200 ms.
+- **URL.** `?q=` mirrors the submitted query, written with `replace` so it doesn't push on every keystroke. `?c=` shows a "Showing Pizza near you · Clear" banner.
+- **Recent searches** are saved on submit or when a result or suggestion is tapped, never per keystroke. Max 8, cleared on sign-out (an additive line in `AuthContext.signOut`).
+- **Default tab** is Dishes when there are dish results, otherwise Restaurants.
+- **Adding from results** keeps today's logic: Add, then a stepper; adding from a second restaurant opens the replace-cart `Dialog` (same copy).
+
+**States**
+
+- No location yet: the compact location prompt with the picker, or the same location states as Home.
+- Dishes loading: dish-row skeletons.
+- Dishes failed: "Couldn't load dishes — restaurant results still shown" (today's copy).
+- No results: today's `noMatchConfig` and `noCategoryConfig` copy, with the WhatsApp link and category suggestions.
+
+**Acceptance:** for any query, results equal today's inline results (same sets, same distance-then-name order); the veg filter matches today's.
+
+### 8.3 Restaurant (`/restaurants/:id`)
+
+```
+┌────────────────────────────────────┐
+│ (←)                        (🔍)    │  AppHeader/overlay over the hero
+│ [   image_urls slideshow 16:9    ] │  Restaurant/Hero
+│ ┌────────────────────────────────┐ │
+│ │ Sharma Bhojnalaya      ★ 4.3   │ │  info card (title-lg)
+│ │ Rajasthani, Thali      (128)   │ │
+│ │ 1.2 km · Main Bazar, Gudha …   │ │  distance only when the origin is known
+│ │ % 11% OFF on ₹200+ │ ₹50 OFF … │ │  Offers/Chips (h-scroll)
+│ └────────────────────────────────┘ │
+│ [🔍 Search in menu ]   [ Veg ◯ ]   │  Menu/Toolbar (sticky under the header)
+│ ★ Top rated here                   │  D12, hides when sparse
+│ ▣ Dal Baati Churma          ┌────┐ │
+│   ₹180 · ★ 4.6 (12)         │img │ │  Menu/DishRow
+│   Three baatis with…  more  └ADD─┘ │  ADD overlaps the image
+│ Full menu · 42                     │
+│ …                                  │
+│ Ratings & reviews                  │  existing reviews list
+├────────────────────────────────────┤
+│ 2 items · ₹310          View cart  │  CartBar (no bottom nav here)
+└────────────────────────────────────┘
+```
+
+- **Public (D4).** `RestaurantMenu` makes no auth-dependent calls, and `restaurants` and `menu_items` are anon-readable (016).
+- **Select additions:** `image_urls`, `lat`, `lng` and `delivery_radius_km`, all in the anon column grant. The hero slideshow then comes from `image_urls`, closing the v2 deferral noted in CLAUDE.md.
+- **Distance and area.** Distance shows when `BrowseProvider` has an origin. If the origin is outside this restaurant's radius, an info notice reads "This kitchen doesn't deliver to your selected location". Checkout still enforces the real geofence.
+- **Menu tools.**
+  - In-menu search filters the loaded items with `dishMatches`. No network call.
+  - The veg toggle is All · Veg (Non-veg as a third chip is optional).
+  - "Top rated here": `rating_count >= 3`, sorted by average, at most 5; shown when at least 2 qualify. Those dishes also appear in the full list.
+- **Dish row spec**
+  - Text column: veg mark, name (`title-sm`, 2 lines), price (`label-md`), rating "★ 4.6 (12)" when the count is above 0, and the description (`body-sm`, clamped to 2 lines with "more").
+  - The image is 112 × 112 at `radius-md`, with ADD overlapping its bottom edge. With no image, ADD aligns right. There is never a placeholder food photo.
+- **The cart** uses the existing `addItem` / `updateQuantity` and the single-restaurant lock. The replace-cart dialog copy is unchanged.
+- **Unavailable restaurant.** RLS hides closed and inactive kitchens, so a missing row means closed, inactive or wrong ID. Show `EmptyState`: "This kitchen isn't taking orders right now", with "See open restaurants" → `/`. Today this case renders "Something went wrong. Not found."
+- **Menu categories** stay hidden (§3.1). The jump-list component is designed in Figma only.
+
+**States:** hero and info skeleton plus 6 dish-row skeletons; reviews load independently (today's behaviour); an empty menu shows "This restaurant's menu is being updated" (today's copy).
+
+**Must not change:** cart semantics, the `menuItem → CartItem` mapping (list price), the offer copy rules and the reviews data source.
+
+**Acceptance**
+
+- A logged-out visitor opens a menu with no login wall.
+- Adding, stepping and replacing behave exactly as today.
+- The hero shows up to 5 images, or a static image under reduced motion.
+
+### 8.4 Cart & Checkout (`/checkout`, D3)
+
+```
+┌────────────────────────────────────┐
+│ ←  Cart                            │  AppHeader/stack
+│ ┌ Sharma Bhojnalaya ─────────────┐ │
+│ │ ▣ Dal Baati     [− 2 +]  ₹360  │ │  items: AddToCartControl + line total
+│ │ ▲ Chicken Curry [− 1 +]  ₹220  │ │
+│ │ + Add more items               │ │  → /restaurants/:cart.restaurant_id
+│ │ ✎ Add cooking instructions     │ │  expands the existing `notes` textarea
+│ └────────────────────────────────┘ │
+│ ┌ % Apply coupon     3 available ▸┐│  Checkout/CouponRow → CouponSheet
+│ └────────────────────────────────┘ │
+│ ┌ Deliver to ────────────────────┐ │
+│ │ (•) Home · 12 Main Bazar …  📍 │ │  Checkout/AddressSection (inline)
+│ │ ( ) Office · …                 │ │
+│ │ ( ) Add a new address          │ │
+│ └────────────────────────────────┘ │
+│ ┌ Bill details ──────────────────┐ │
+│ │ Item total               ₹580  │ │  Checkout/BillDetails
+│ │ Discount (11%)           −₹50  │ │
+│ │ Delivery fee (1.2 km)     ₹25  │ │
+│ │ Platform fee               ₹5  │ │
+│ │ To pay                   ₹560  │ │
+│ └────────────────────────────────┘ │
+│ ┌ 💵 Cash on delivery ───────────┐ │
+│ │ Pay the rider when food arrives│ │
+│ └────────────────────────────────┘ │
+├────────────────────────────────────┤
+│ ⓘ Set your delivery location       │  blocker line (only when disabled)
+│ ₹560 · View bill   [ Place order ] │  StickyActionBar
+└────────────────────────────────────┘
+```
+
+**The approach: move the JSX, not the logic.** Everything above the `return` in `Checkout.tsx` stays in `Checkout.tsx`, byte for byte: state, effects, `effectivePricing`, `offerCart`, `openConfirm`, `handlePlaceOrder`, the coupon handlers and the error-prefix mapping. There is one exception: the `canPlace` expression moves **verbatim** into `canPlaceOrder()` in `lib/checkoutGate.ts`, so it can be tested side by side with the footer's blocker (below). Only the JSX is split into the section components, which take props and call the same handlers. The one logic-adjacent change is D7 (default address), in its own commit.
+
+**Sections**
+
+- **Order of sections:** items → instructions → coupon → address → bill → payment.
+- **Address stays inline, not in a sheet.** That avoids a modal (`LocationConfirmModal`) on top of a sheet and a keyboard inside a sheet. The radio-group semantics, the "Add a new address" GPS button, the textarea, the pinned and out-of-area notices and the retry for failed restaurant geo all keep today's conditions.
+- **Bill lines** come from `billLinesFromPricing(effectivePricing, labels)`.
+  - The labels are computed exactly as today: `discountLabel`, `deliveryLabel` with the distance, the free-delivery coupon line, the surge label, "· FREE" only when the fee is 0.
+  - While `deliveryKnown` is false, the fee line renders a skeleton and the total renders "—". It is **never ₹0** (Principle 1).
+  - `ConfirmOrderModal`'s summary renders the same component.
+- **Hint line** (`buildHint`) and the "Couldn't load delivery pricing · Try again" notice are unchanged.
+- **Payment** is a static row: "Cash on delivery: pay the rider when your food arrives." It is true and not interactive.
+
+**Sticky footer**
+
+- It shows the total (or "—") with "View bill", which scrolls to the bill, and the primary button.
+- The labels are today's, in sentence case: "Place order · ₹X", "Loading pricing…" or "Checking your coupon…".
+- Pressing it opens `ConfirmOrderModal`, which stays the safety net: default focus on "Go back", re-pricing at tap time, errors shown inside the modal.
+
+**Blocker line.** `checkoutBlocker()` returns the first failing condition, in this order. The copy is a draft:
+
+| Condition (same inputs as `canPlace`) | Footer message |
 |---|---|
-| `discountSource` | `'none' \| 'auto' \| 'coupon'`: where `discount` came from |
-| `discount` | the discount on the items actually applied, festival *or* coupon. It's still the figure `p_discount` sends. |
-| `deliveryWaiver` | the delivery fee the coupon removes. It's `null` while delivery is unknown, and never a made-up 0 (Principle 1). |
-| `autoDiscount` | what the festival discount would give on this cart, for the "we've kept your festival discount" copy |
-| `couponLock` | `min_subtotal` · `wrong_time` · `no_saving` · `auto_better` · `needs_address` · `null` |
-| `hints.rupeesToCoupon` | how many rupees the cart needs to reach the chosen coupon's `min_subtotal` |
+| `cart.items.length === 0` | "Your cart is empty" (the screen shows the empty state instead of a footer; the row exists so the parity test holds) |
+| `!restaurantGeo && !geoLoadFailed` | "Loading delivery details…" |
+| `geoLoadFailed` | "Couldn't load delivery details. Try again above." |
+| `!effectivePricing.deliveryKnown` | "Loading delivery pricing…", or "Couldn't load delivery pricing. Try again above." when the config fetch failed (`deliveryConfigError`; it chooses the copy only) |
+| `needsDeliveryPin` | "Set your delivery location to continue" |
+| `deliveryOutOfArea` | "This address is outside {restaurant}'s delivery area" |
+| `address.trim().length <= 10` | "Add your full address (house no., street, landmark)" |
+| `checkingCoupon` | "Checking your coupon…" |
+| `placing` | "Placing your order…" |
 
-The total becomes `subtotal − discount + deliveryFee − deliveryWaiver + platformFee + surgeFee`. With no coupon, every existing field is exactly what it is today, so nothing that already calls this function (the cart bar, the menu, discovery) changes.
+A unit test enumerates the input combinations and asserts that `checkoutBlocker(x) === null` exactly when `canPlaceOrder(x)`. `canPlaceOrder` is today's expression moved verbatim into `lib/checkoutGate.ts`.
 
-A free-delivery coupon can't be compared with the festival discount until the delivery fee is known. Until then, `discountSource` stays on the festival discount and `couponLock` is `needs_address` ("Pin your delivery address to see what FREEDEL saves"). The order can't be placed at that point anyway, because `deliveryKnown` is false.
+**Overlays.** `CouponSheet` moves onto `Sheet`; `ConfirmOrderModal` onto `Dialog`; `LocationConfirmModal` is restyled with the OSM attribution kept. Their content and props are unchanged.
 
-### 5.7 Checkout
+**States**
 
-A **coupon row** sits between the items and the bill, as on Zomato. The bill below it is example B:
+- Empty cart: `EmptyState`, "Your cart is empty", with "Explore restaurants".
+- The pricing-pending and pricing-failed notices, coupon notices and RPC error copy are today's strings, rendered through `InlineNotice` or inside the dialog.
 
-```
- ┌───────────────────────────────────────────────────────────┐
- │ 🏷  Apply coupon                          2 available  ›  │   nothing chosen
- ├───────────────────────────────────────────────────────────┤
- │ 🏷  DIWALI50 applied · you save ₹50              Remove   │   coupon in use
- ├───────────────────────────────────────────────────────────┤
- │ 🏷  BIGFEAST · add ₹299 more to use it           Remove   │   chosen, but locked
- └───────────────────────────────────────────────────────────┘
+**Must not change.** §15.4 items 1–8, especially:
 
- Item total                                  ₹300
- Coupon · DIWALI50                           −₹50      ← replaces "Discount (11%)"
- Delivery fee (2.5 km)                        ₹30
- Platform fee                                  ₹5
- Total                                       ₹285
-```
+- `place_order` arguments (the coupon keys are sent only when a coupon is in use);
+- the error prefixes `COUPON_INVALID:`, `DELIVERY_TOO_FAR:`, `DELIVERY_PIN_REQUIRED:` and `PRICING_MISMATCH:`;
+- re-pricing at tap time;
+- saving the address only after the order succeeds;
+- the coupon re-check when the confirm dialog opens.
 
-A free-delivery coupon adds its own line under the delivery fee instead: `Free delivery · FREEDEL  −₹20`.
+**Acceptance**
 
-Tapping the row opens the **coupon sheet**. It behaves like `ConfirmOrderModal`: focus is trapped inside and restored on close, ESC and a backdrop tap close it, and the page behind doesn't scroll. With a ₹300 cart:
+- `pricing.test.ts`, `coupons.test.ts` and `CouponSheet.test.tsx` pass unchanged.
+- The new bill-line and gate tests pass.
+- The manual matrix in §15.2 (rows 8–13) passes: a coupon applied, locked or beaten by the festival discount; surge on; out of area; no pin; a pricing error with retry; `PRICING_MISMATCH` with reload.
 
-```
- Coupons                                                        ✕
- ┌─────────────────────────────────────────┐  ┌───────┐
- │ Enter coupon code                       │  │ Apply │
- └─────────────────────────────────────────┘  └───────┘
-
- YOUR COUPONS
-   SORRY4KQ7   ₹40 off · orders above ₹149       you save ₹40   [Apply]
-               Sorry about your declined order · expires in 5 days
-
- OFFERS FOR YOU
-   DIWALI50    ₹50 off · orders above ₹249   BEST you save ₹50  [Apply]
-   BIGFEAST    ₹100 off · orders above ₹599      🔒 Add ₹299 more
-   IPLNIGHT    ₹30 off · Sat–Sun, 7–11 PM        🔒 Works from 7 PM
-
- AUTOMATIC
-   Festival offer · 11% off up to ₹50 on ₹200+ · saves ₹33 now
-   Used whenever no coupon saves more.
-```
-
-How it behaves:
-
-- **Order of the list.** Usable coupons come first, sorted by saving, and the biggest saving overall is tagged **BEST**. Locked coupons follow, sorted by how many rupees are needed to unlock them.
-- **Every apply goes through `preview_coupon`**, whether the code was typed or tapped in the list, so the status is always fresh. That also creates the lookup record `place_order` needs. Checkout previews the chosen coupon again when the confirm modal opens.
-- **Applying a coupon that loses to the festival discount** doesn't spend it, and the sheet says so (`auto_better`, §3.7).
-- **Nothing is applied automatically (D11)** except a *pending* code: one the customer brought with them through a banner, a push or a share link (§5.8). Checkout reads it when it loads, previews it, applies it if it's usable, and then clears it.
-- **The chosen coupon survives a page refresh.** It's stored in `localStorage["redlotus_checkout_coupon"]` together with the restaurant id, and cleared when the order succeeds, when the cart is emptied and when the restaurant changes.
-- **Hints.** While a coupon is in use, the festival hint ("Add ₹X to unlock 11% off") is hidden. With a free-delivery coupon, the free-delivery hint is hidden too.
-- **Placing the order.** `handlePlaceOrder` still prices everything again at the moment of the tap, now including the coupon. It sends `p_coupon_code` and `p_delivery_waiver` only when `discountSource === 'coupon'`.
-
-**When `place_order` returns an error:**
-
-- **`COUPON_INVALID: <status>`**: remove the coupon from checkout, price everything again, and show this in the confirm modal: *"DIWALI50 just ran out, so your total is now ₹302. Tap Place Order to order without it."* The new total is on screen before the customer taps again. A personal code stays in "My coupons" unless its status was `used` or `expired`.
-- **`PRICING_MISMATCH:`**: run today's handler (reload `delivery_config`, price again), **and** preview the chosen coupon again, in case Ankit edited it while the customer was at checkout.
-
-**Copy.** The sheet, the coupon row and the modal all use the same wording. Keep it in `coupons.ts`, next to `couponLockReason`.
-
-| Status | Copy |
-|---|---|
-| `not_found` | We couldn't find that code. Check the spelling and try again. |
-| `not_eligible` | Coupons can't be used on restaurant or admin accounts. |
-| `not_yours` | This coupon belongs to a different account. |
-| `own_referral` | That's your own referral code — share it with friends instead. |
-| `unavailable` | This coupon isn't available right now. |
-| `not_started` | This coupon starts on {date}. |
-| `expired` | This coupon expired on {date}. |
-| `wrong_time` | This coupon works {days}, {hours} only. |
-| `wrong_restaurant` | Not valid at {restaurant}. Works at {list}. |
-| `new_customers_only` | This coupon is for your first order only. |
-| `returning_only` | This coupon is for customers who have ordered before. |
-| `used` | You've already used this coupon. *(If a pending order holds it:)* It's on your order that's waiting for the restaurant — it comes back if that order is declined or you cancel it. |
-| `sold_out` | This coupon has been fully claimed. |
-| `too_many_attempts` | Too many tries. Please wait a few minutes and try again. |
-| `min_subtotal` | Add ₹{x} more to use this coupon. |
-| `no_saving` | Delivery is already free on this order, so this coupon wouldn't save anything. |
-| `auto_better` | Your festival discount saves ₹{a} — more than this coupon's ₹{c} — so we've kept it. |
-| `needs_address` | Pin your delivery address to see what this coupon saves. |
-
-### 5.8 "My coupons", deep links and banners
-
-**`/coupons`** is a new route, loaded on demand and open to everyone. It has four sections:
-
-- **Enter a code** (signed in): shows what the code gives and where it works. "Use at checkout" makes it the pending code.
-- **Your coupons** (signed in): personal codes, soonest expiry first, each with the reason it was given.
-- **Offers for everyone**: listed public offers, visible to signed-out visitors too, each with "Works at: …".
-- **Refer friends**: arrives in Phase 3 (§7).
-
-Customers reach it from the `AppTopBar` avatar menu, from `Profile`, from "See all" in the checkout sheet, and through the links below.
-
-**The pending code.** Opening `/coupons?apply=CODE` does three things:
-1. Stores the code in `localStorage["redlotus_pending_coupon"]`, where it lasts 7 days and its shape is checked when it's read.
-2. Shows the coupon, with a "Start ordering" button.
-3. Leaves it for checkout to pick up (§5.7).
-
-The code survives the sign-in redirect the same way the cart does. The browser only ever *stores* it; `preview_coupon` validates it at checkout. So a forged link can't do anything a typed code couldn't.
-
-That one URL serves every channel:
-
-- **Banners:** a `promotions` row (017) with `link_url = '/coupons?apply=DIWALI50'`. `PromoCarousel` already turns internal links into `<Link>`s, so no code change is needed.
-- **Push:** `data.url = '/coupons?apply=DIWALI50'`. `NativeBridge` already navigates to `data.url` when a notification is tapped.
-- **Share links** (referrals, forwarded WhatsApp messages): `https://redlotusfoods.in/coupons?apply=ANKIT7Q`. Android opens it in the installed app when App Links are verified, and in the browser otherwise.
-
-### 5.9 Receipts and legal text
-
-- **`ConfirmOrderModal`**: the coupon line replaces the discount line (`Coupon · DIWALI50  −₹50`), or a free-delivery coupon adds `Free delivery · FREEDEL  −₹20` under the delivery fee.
-- **`OrderStatus` and `OrderHistory`**: select `coupon_code` and `coupon_delivery_waiver`, and label the existing discount row from the order's snapshot:
-
-  | Snapshot | What the receipt shows |
-  |---|---|
-  | `coupon_code` is NULL | `Discount  −₹33` (as today) |
-  | `coupon_code` set, `coupon_delivery_waiver` = 0 | `Coupon · DIWALI50  −₹50` |
-  | `coupon_delivery_waiver` = `discount_amount` | `Free delivery · FREEDEL  −₹20` |
-
-  The "Item total" formula doesn't change (§5.2).
-
-- **Terms of Service §10** (D14). Draft:
-
-  > **Coupons.** We may offer coupon codes. Unless a coupon says otherwise: you can use one coupon per order; a coupon can't be combined with an automatic discount — your order gets whichever saves more; coupons have no cash value and can't be exchanged, sold or transferred; a coupon issued to your account can only be used on your account; if an order that used a coupon is declined, expires, or is cancelled while it is still waiting for the restaurant, the coupon is returned to you if it is still valid. We may change or withdraw a coupon at any time before you place an order, and may refuse coupon use we reasonably believe to be fraudulent or abusive, such as the use of multiple accounts.
-
-- **Privacy Policy**: add that we store coupon use and referral relationships to apply offers and prevent abuse, and never share them with restaurants. The existing line "to apply promotions and compute your order total correctly" already covers most of this.
-
-### 5.10 Nothing changes for owners
-
-Because RedLotus pays (D1), nothing changes on the owner's side: their payout, their commission, the "Order value" they see, and every owner screen and notification stay exactly as they are. Owners never see a coupon. That's not because it's hidden from them; it's because nothing on their side reads it, and §5.2 keeps `menuValue()` exact. One new case in `utils.test.ts` pins this: on a free-delivery coupon order, `menuValue` equals the item total.
-
-The rider's cash handling doesn't change either. They collect `total_amount`, which already includes the coupon.
-
-### 5.11 Managing coupons from the Dashboard
-
-Coupons are rows. The helpers live in the `private` schema, which the API can't reach (§9.1), and you run them from the SQL Editor. Save these as snippets.
-
-**A public event coupon.** Use the Table Editor, or:
-
-```sql
-WITH c AS (
-  INSERT INTO coupons (slug, kind, title, description, show_in_offers,
-                       discount_type, discount_value, min_subtotal,
-                       starts_at, ends_at, per_customer_limit, total_limit, budget_rupees)
-  VALUES ('diwali_2026', 'public', '₹50 off this Diwali', 'On orders above ₹249', true,
-          'flat', 50, 249,
-          '2026-11-06 00:00+05:30', '2026-11-13 00:00+05:30', 2, 300, 10000)
-  RETURNING id)
-INSERT INTO coupon_codes (coupon_id, code) SELECT id, 'DIWALI50' FROM c;
-```
-
-**A batch for flyers.** Create the coupon first (kind `batch`, e.g. ₹40 off orders of ₹199 or more, ending 31 Dec), then:
-
-```sql
-SELECT * FROM private.coupon_generate_batch('flyers_college_nov', 200);
--- Returns 200 codes. Use "Download CSV" in the SQL Editor and send the file to the printer.
-```
-
-**A personal code**, for example an apology issued by hand or a gift for a regular:
-
-```sql
-SELECT private.coupon_issue_personal('goodwill_40', '9876543210', 'Late delivery on 12 Nov');
--- Returns the new code, e.g. 'H7QK2MXA'. It expires after the coupon's valid_days.
--- It refuses if the phone matches no customer, or matches more than one account;
--- in that case, pass the user id instead of the phone.
-```
-
-**Pause, resume and revoke:**
-
-```sql
-UPDATE coupons      SET active = false     WHERE slug = 'diwali_2026';   -- pause (set true to resume)
-UPDATE coupon_codes SET revoked_at = now() WHERE code = 'H7QK2MXA';      -- switch off one code
-UPDATE coupons      SET active = false;                                   -- switch off every coupon
-```
-
-**Never delete a coupon or code that has been used.** The foreign keys from `orders` will refuse it. Pause it instead.
-
-**What an edit does to a customer who is mid-checkout.** Nothing is cached on the server, so the next `place_order` sees the new rules:
-- **An edit that changes the price** (the value or the cap): the client's figure no longer matches, so `place_order` returns `PRICING_MISMATCH`. Checkout previews the coupon again and shows the new total.
-- **An edit that makes the coupon unusable** (paused, ended, or the budget cut below what's been spent): `place_order` returns `COUPON_INVALID`, and checkout removes the coupon.
-
-In both cases the customer is never charged a total they didn't see.
-
-### 5.12 Reports
-
-These are views in `private`, so no API role can reach them:
-
-- **`private.coupon_performance`**: one row per coupon, with:
-  - kind, whether it's active, and its time window;
-  - uses, split into **completed**, **in progress** (live but not completed) and **released** (declined, expired or cancelled);
-  - unique customers, and **new customers won** (customers whose first delivered order used this coupon);
-  - money **given** (`SUM(discount_amount)` on completed orders) and **reserved** (on orders in progress);
-  - budget left;
-  - the **extra cost** over the festival discount (`SUM(discount_amount − auto_discount_forgone)`);
-  - average order value, and when it was last used.
-- **`private.coupon_uses`**: every coupon order, with when it was placed, the customer's name, the restaurant, the status, the code, the discount and the total.
-- **`private.coupon_daily_spend`**: for each IST day, how much went on the festival discount and how much on coupons.
-
-The settlement views change as described in §10.
-
----
-
-## 6. Automatic codes (Phase 2)
-
-### 6.1 `coupon_programs`
-
-There's one row per programme, tuned from the Dashboard (the `discount_config` pattern):
-
-```sql
-CREATE TABLE public.coupon_programs (
-  program           text    PRIMARY KEY CHECK (program IN
-                      ('apology','first_order_thanks','every_nth_order','winback','referral')),
-  active            boolean NOT NULL DEFAULT false,
-  coupon_id         uuid    REFERENCES public.coupons(id),  -- the kind='personal' coupon whose rules each issued code carries
-  referee_coupon_id uuid    REFERENCES public.coupons(id),  -- referral only: the kind='referral' coupon that friends use (§7)
-  nth               int     CHECK (nth >= 2),               -- every_nth_order
-  inactive_days     int     CHECK (inactive_days >= 14),    -- winback
-  cooldown_days     int     NOT NULL DEFAULT 7 CHECK (cooldown_days >= 0),  -- minimum days between two of this programme's codes for one customer
-  monthly_cap       int     CHECK (monthly_cap >= 1),       -- referral: rewards per referrer per calendar month
-  push_title        text,
-  push_body         text,
-  updated_at        timestamptz NOT NULL DEFAULT now()
-);
-```
-
-Every programme is seeded **switched off**, with its template coupon already in place, so turning one on is a single `UPDATE`. Recommended starting values (D13):
-
-| Programme | Issued when | Gives | Min order | Valid for | Cooldown / cap |
-|---|---|---|---|---|---|
-| **Welcome** *(Phase 1: a public coupon, not a programme)* | first order | ₹50 off | ₹199 | until its ₹5,000 budget runs out | once per customer |
-| `apology` | an order is **declined** or **expires** | ₹40 off | ₹149 | 7 days | 1 per 7 days |
-| `first_order_thanks` | the **first** order is delivered | ₹30 off | ₹199 | 10 days | once ever |
-| `every_nth_order` | every **5th** order is delivered | ₹50 off | ₹249 | 14 days | — |
-| `winback` | **30 days** after the last delivered order | ₹50 off | ₹199 | 7 days | 1 per 60 days |
-| `referral` (§7) | a friend's first order is delivered | the friend: ₹50 off their first order; the referrer: ₹50 off | ₹199 | the referrer's code: 30 days | 5 rewards a month |
-
-"First order" appears twice on purpose:
-- **Welcome** wins new customers: a discount *on* the first order, for anyone new.
-- **First-order thanks** keeps them: a reason to place a *second* order, the one most new customers never place.
-
-### 6.2 Issuing
-
-One trigger, `AFTER UPDATE OF status ON orders`, calls `private.on_order_status_coupons()`:
+### 8.5 Order tracking (`/orders/:id`)
 
 ```
-pending → declined | expired    → issue('apology', customer, order)
-
-… → completed                   → count this customer's completed orders:
-                                    exactly 1                → issue('first_order_thanks', …)
-                                    a multiple of nth        → issue('every_nth_order', …)
-                                  if the order used a referral code and it's the
-                                  customer's first completed order → reward the referrer (§7)
+┌────────────────────────────────────┐
+│ ←  Order #280630B5          Help   │  Help = WhatsApp, prefilled with the order id
+│ ┌────────────────────────────────┐ │
+│ │ Preparing your food            │ │  Orders/StatusHero (aria-live="polite")
+│ │ Arriving in 25–35 min · ~7:45  │ │  computeEtaWindow (unchanged)
+│ │ Sharma Bhojnalaya              │ │
+│ └────────────────────────────────┘ │
+│  ● Order placed          7:02 PM   │  Orders/Tracker
+│  ● Confirmed             7:04 PM   │  times only where stored
+│  ◉ Preparing                       │  live step: green, soft pulse
+│  ○ On the way                      │
+│  ○ Delivered                       │
+│ [ Turn on notifications ]          │  native push pre-prompt (unchanged)
+│ ┌ Order details ─────────────────┐ │
+│ │ items · bill · address · notes │ │  BillDetails from the order snapshot
+│ └────────────────────────────────┘ │
+│ [ Cancel order ]                   │  pending only
+└────────────────────────────────────┘
 ```
 
-`private.issue_program_code(program, user, source_order)` only issues a code when all of these hold:
-- the programme is switched on, and its template coupon is active;
-- the customer has the `customer` role and doesn't share a phone with the restaurant (§3.5);
-- the programme's cooldown or cap allows it.
+**Labels** (presentation only; the `STATUS_MESSAGES` sentences stay as the body text):
 
-The code is a personal code with `assigned_to` set, `expires_at = now() + valid_days`, `issued_reason` set to the programme and `source_order_id` set to the order. `uq_coupon_codes_source` makes it impossible to issue a second code for the same order and reason.
-
-A customer cancelling their own order (`→ cancelled`) never gets an apology code, because it was their own action.
-
-### 6.3 A coupon bug must never block an order
-
-This trigger runs inside the owner's accept, decline and deliver updates, and inside the cron job's expiry update. If issuing a code fails for any reason (a clash on a generated code, a bad programme row, anything else), **the status change must still go through**. So:
-- The trigger body is wrapped in `BEGIN … EXCEPTION WHEN OTHERS THEN RAISE WARNING …; END`.
-- The function is `SECURITY DEFINER` with `search_path = ''`, because owners have no grant on the coupon tables.
-- A test pins it: with the apology programme pointing at a broken coupon row, declining an order still succeeds.
-
-### 6.4 Win-back
-
-A daily job at 11:00 IST runs this chain:
-1. `pg_cron` calls `net.http_post`.
-2. That calls a new Edge Function, `coupon-jobs`, behind the same `X-Cron-Secret` check as `expire-orders`.
-3. `coupon-jobs` calls `public.issue_winback_coupons()`, which only `service_role` can execute.
-4. It sends one push per issued code through `send-push`.
-
-The cron job is created in the SQL Editor, like the other cron jobs.
-
-It picks customers who meet all of these:
-- their last delivered order is at least `inactive_days` old;
-- they have no live order;
-- they hold no unexpired, unused personal code;
-- they haven't had a win-back code within the cooldown.
-
-It picks at most 200 per run, so the first run over the whole customer base is limited.
-
-### 6.5 Telling the customer
-
-- **Push.** `send-push` already sends a push on every status change, through the `orders` webhook. After the usual status text, it looks up `coupon_codes` by `source_order_id` and adds a line. The trigger wrote the code in the same transaction, which committed before the webhook fired, so the code is always there to find.
-  - Declined: *"The restaurant couldn't take this order. Nothing to pay — and ₹40 off your next order is waiting in Coupons."*
-  - Delivered, with a milestone code: *"Delivered — enjoy your meal! 🍽️ Your next order has ₹50 off, in Coupons."*
-- **On the order page.** For a declined or expired order, `OrderStatus` shows a card: *"Sorry about that. Here's ₹40 off your next order: SORRY4KQ7, valid for 7 days."* It finds the code through `list_offers` (`source_order_id`).
-- **Customers who only use the website** get no push, because push is only in the Android app. They'll see the code in "My coupons" and in the checkout sheet next time. Coupons don't use SMS (§14).
-
----
-
-## 7. Referral programme (Phase 3)
-
-### 7.1 How it works
-
-1. **A customer gets their code.** Any customer with at least one delivered order can open **Refer friends** (on `/coupons` and in `Profile`). `public.get_my_referral_code()` returns their existing code or creates one: up to five letters of their first name plus three random characters (`ANKIT7Q`). If the name has no Latin letters, the code is `RL` plus six random characters.
-2. **They share it** with a WhatsApp button. The message reads: *"Get ₹50 off your first RedLotus order with my code ANKIT7Q: https://redlotusfoods.in/coupons?apply=ANKIT7Q"*.
-3. **The friend uses it.** A new customer (D10) uses the code on their first order and gets ₹50 off orders of ₹199 or more, under the `referral` coupon's rules.
-4. **The referrer is rewarded.** When that order is **delivered**, the trigger issues the referrer a personal ₹50 code, valid for 30 days. `send-push` tells them: *"Your friend just got their first RedLotus order. ₹50 off your next order is waiting in Coupons."* The message never names the friend.
-
-If the friend's first order is declined or expires, the use of the referral code comes back (§3.6). The reward comes when a later order with the code is delivered.
-
-### 7.2 Rules
-
-- The friend must be a new customer (D10), and can't be the referrer, matched by account or phone (`own_referral`).
-- The reward needs a **delivered** order, which means a real meal paid for in cash. An order that's only been placed earns nothing.
-- **The referrer's rewards are capped.** A referrer gets at most `monthly_cap` rewards (5) per calendar month. Friends referred beyond that still get their discount.
-- **The cap can't be overshot.** If two friends' orders are delivered at the same moment, `pg_advisory_xact_lock` on the referrer makes them run one at a time.
-- The referral coupon has a budget, because the Boundedness Invariant applies to `referral` coupons.
-
-### 7.3 Abuse
-
-The cheapest attack is one person with two SIM cards referring themselves. Each fake "friend" costs a real meal, delivered and paid for in cash, and earns ₹100 of discounts (₹50 + ₹50). At Gudha Gorji menu prices, that's a poor trade.
-
-`private.referral_audit` flags the patterns worth a look:
-- referrers close to their monthly cap;
-- friends whose delivery pin is within 100 m of one of the referrer's saved addresses. That's either a family member or a second SIM, and Ankit decides which.
-
-A flagged code can be revoked.
-
----
-
-## 8. Announcing coupons
-
-- **Banners (Phase 1).** A `promotions` row linking to `/coupons?apply=CODE` (§5.8). The festival discount line on discovery cards stays as it is.
-- **Push campaigns (Phase 3).** A new Edge Function, `promo-broadcast`, behind `X-Cron-Secret`. Ankit calls it with curl, or from the SQL Editor through `net.http_post`.
-  - It takes `{ campaign_id, title, body, url, audience }`, where `audience` is `all`, `never_ordered` or `lapsed_30d`.
-  - It finds the users through `public.promo_push_audience()` (`service_role` only) and sends each one a `channel: "promos"` push through the existing FCM path.
-  - `campaign_id` is recorded in `promo_broadcasts`, and sending the same id twice does nothing, so running the curl twice can't message everyone twice.
-  - Android users can mute the "promos" channel in system settings and still get order updates.
-- **Offer lines (Phase 3).** The best listed offer at each restaurant, shown as a line on its discovery card and as a pill on its menu page. It comes from one `list_offers()` call when the home page loads.
-
-Copy rule: none of it may say "app", "download" or "install" (the CLAUDE.md product constraints).
-
----
-
-## 9. Security & abuse
-
-### 9.1 Only three functions can read coupon data
-
-- **The tables:** `coupons`, `coupon_codes`, `coupon_lookups`, `coupon_programs` and `promo_broadcasts` have RLS on, no policies, and no grants to `anon` or `authenticated`. That's the `restaurant_commissions` pattern. Batch and personal codes work like cash: if `coupon_codes` were readable, it would give them all away.
-- **The client's way in:** clients reach coupon data only through `preview_coupon`, `list_offers` and, in Phase 3, `get_my_referral_code`. Each returns exactly what the caller is allowed to see (§5.5).
-- **The `private` schema:** internal functions and admin helpers live there.
-  - It isn't one of the schemas the API exposes. Those are `public` and `graphql_public` by default, and `config.toml` doesn't change that. **Check the production setting once in Dashboard → API settings.**
-  - `anon` and `authenticated` get no `USAGE` on it.
-  - `EXECUTE` is also revoked from `PUBLIC`, as extra protection.
-
-  This matters because Postgres grants `EXECUTE` on every new function to `PUBLIC` by default. A SECURITY DEFINER `coupon_issue_personal` in `public` would let any signed-in customer create coupons for themselves.
-- **Service-only functions:** some functions have to be called by an Edge Function over the API (`issue_winback_coupons`, `promo_push_audience`). They stay in `public`, with `EXECUTE` revoked from `PUBLIC`, `anon` and `authenticated` and granted to `service_role`. The verify script checks every one of them.
-
-### 9.2 Race conditions
-
-| Race | Prevented by |
-|---|---|
-| Two customers take the last use, or the last of the budget | the `coupons` row lock in `place_order`, taken before the counts are read |
-| One customer places two "first orders" with two different new-customer coupons | the customer's `users` row lock |
-| Two deliveries at the same moment push a referrer over their monthly cap | an advisory lock per referrer |
-| The same automatic code is issued twice for one order | `uq_coupon_codes_source` |
-
-### 9.3 Guessing codes
-
-- **`preview_coupon` is the only way to look up a code.** It records every miss and refuses after 10 misses per account per hour.
-- **`place_order` only accepts a code this account has previewed in the last 24 hours**, so it can't be used as an unlimited way to test codes. `place_order` has to work like this because a raised exception rolls back its whole transaction, so it can't record a miss itself.
-- **Generated codes are hard to guess.** They're 8 characters from a 31-character alphabet: 31⁸ ≈ 8.5 × 10¹¹ possibilities.
-- **The numbers:** take an attacker with 100 phone-verified accounts, guessing non-stop for a month (720,000 guesses), against 1,000 live batch codes. On average they would find **0.0008** of one code.
-- **Personal codes** are useless to anyone else even if found.
-
-### 9.4 One person, many accounts
-
-"New customer" and "per customer" are judged by account **and** phone (D10, §5.3).
-
-Someone with a second SIM can still get through. What limits them is budgets, per-customer limits and, for referrals, the need for a delivered meal. Phone-OTP login (`phone_otp_login_plan.md`) will make the phone number the account, which tightens this further without any change here.
-
-### 9.5 Owners and their phones
-
-The 026 guard (§3.5) runs at preview, when the order is placed, and when a code is issued.
-
-The attack it stops: an owner orders from their own restaurant with a coupon RedLotus pays for. The restaurant is still paid the full menu price at settlement, so a ₹100 flat coupon on a ₹200 order nets the owner about ₹50 per fake order. The guard can't see an owner using a friend's phone, but `private.coupon_uses` shows it: a restaurant whose coupon orders all come from the same two customers.
-
-An owner could also collect apology codes for a friend by declining that friend's orders on purpose. What limits that:
-- the 7-day cooldown;
-- the ₹40 value;
-- a high decline rate is already something Ankit watches for.
-
-### 9.6 Account deletion
-
-`delete-account` gains one step: revoke the customer's unused personal codes and their referral code (`revoked_at = now()`). The codes aren't deleted, because orders point to them.
-
-### 9.7 Two policy rules
-
-- **Never give a coupon in return for a review or rating.** It would corrupt the reviews system (019/026), and it breaks Google Play's policy on incentivised ratings.
-- **Never tie a reward to installing the app.** Referral rewards are paid on a delivered order, not on an install.
-
----
-
-## 10. Settlement and money reporting
-
-Because the coupon is stored in `discount_amount` (§5.2) and RedLotus pays for it (D1), **022's settlement formula doesn't change**:
-
-```
-redlotus_gross = total_amount − restaurant_payout
-               = commission + delivery_fee + surge_fee + platform_fee − discount_amount
-```
-
-Like the festival discount, the whole coupon lands on RedLotus's side of the ledger. Two views change. Each is updated with `CREATE OR REPLACE VIEW`, with new columns added at the end:
-
-- **`order_settlement`**: adds `coupon_code`, `coupon_delivery_waiver` and `auto_discount_forgone`.
-- **`order_delivery_margin`**: `collected` becomes `delivery_fee + surge_fee − coupon_delivery_waiver`. A delivery fee the coupon removed is money the ride didn't earn.
-
-The Discount-Funding Invariant (commission higher than the festival discount, 022 §3.8) still applies to the festival discount. It deliberately does **not** apply to coupons: a welcome coupon is meant to cost more than one order earns (example E). Coupons are marketing spend, controlled by budgets, and `coupon_performance` shows whether each one paid for itself.
-
-**GST:** the unresolved e-commerce-operator question (`v2_deferred_issues.md` §7.9) now also covers how discounts that RedLotus pays for are treated. It belongs with that question: something to ask a CA.
-
----
-
-## 11. Rollout
-
-Each phase follows the same routine as 024–026:
-
-1. **PR.** It contains:
-   - the migration;
-   - `ops/0NN_verify.sql` (one `UNION ALL` query);
-   - `ops/0NN_rollback.sql`;
-   - sample coupons in `seed.sql`, which only preview branches use.
-2. **Preview branch.** Run the end-to-end SQL script (§12) against the branch. Every case must pass.
-3. **Production `db push`**, outside 12–2 PM and 7–9:30 PM IST. Check the time with PowerShell `Get-Date`, not Git Bash. Then run `0NN_verify.sql`.
-4. **Merge.** Vercel deploys the website, and the `package.json` version bump sends the update to the Android app over the air.
-5. **The first coupon.** Create it with `active = false`, test it with a customer account (admin accounts are refused), then switch it on.
-
-**Nothing changes by default.** Until a coupon row exists and is active, v5 behaves exactly like v4 for everyone. Installed apps still running the old bundle keep working through the `DEFAULT NULL`s. They can't apply a coupon until the update arrives. They also label a coupon order's discount as "Discount", but the amounts are still right (§5.2).
-
-**Rolling back:**
-- **Soft (seconds, no deploy):** `UPDATE coupons SET active = false;`
-- **Hard:** `ops/0NN_rollback.sql`. It puts back `place_order` v4 and drops the coupon functions, but keeps the new `orders` columns. Past coupon orders still show correctly, because their value is in `discount_amount`.
-
-**Chores:**
-- Regenerate `src/types/database.ts`. If Docker isn't running, use the `--linked` route described in the supabase-type-gen notes.
-- Update `ops/023_verify.sql`, which names the 11-argument `place_order` signature.
-
----
-
-## 12. Tests
-
-**Pure logic (Vitest)**, within the Phase 4 test scope:
-
-- **`src/lib/coupons.test.ts`:**
-  - `couponAmounts` for each discount type at every boundary:
-    - exactly at `min_subtotal`, and one rupee under;
-    - the cap binding, and not binding;
-    - `.5` rounding;
-    - free delivery with a fee of 0, with a cap below the fee, and with an unknown fee (`null`, never 0).
-  - `isCouponLive`:
-    - campaign dates;
-    - IST weekdays at the 00:00 IST boundary;
-    - daily windows, including one that runs past midnight;
-    - whichever of `ends_at` and `expires_at` comes first.
-  - Choosing between coupon and festival discount:
-    - the coupon wins;
-    - the festival discount wins;
-    - a tie keeps the festival discount and doesn't spend the coupon;
-    - free delivery waiting for an address.
-  - `normaliseCode`, against the same cases as the SQL version.
-- **`src/lib/pricing.test.ts`:**
-  - with `coupon = null`, every existing expectation is unchanged;
-  - with a coupon, the six §4 examples come out exactly.
-- **`src/pages/dashboard/utils.test.ts`:** on a free-delivery coupon order, `menuValue` equals the item total (§5.10).
-
-**Database, end to end on the preview branch.** This is a SQL script, as for 025 and 026:
-
-1. The normal path for each discount type: the stored columns and `total_amount` match §4.
-2. The per-customer limit holds, and a second account on the same phone is refused.
-3. **Two sessions try to take the last use at the same time: exactly one succeeds.**
-4. A decline, an expiry and a cancellation each give the use back; a completed order keeps it.
-5. Budget: an order that would go over is refused, and pending orders count against it.
-6. The new-customer rule, including an account that is deleted and created again on the same phone.
-7. An owner, an admin, and a customer on the restaurant's or owner's phone are all refused.
-8. Claiming both the festival discount and a coupon is refused (`PRICING_MISMATCH`).
-9. The guessing limiter trips at 10 misses and resets after an hour.
-10. `place_order` with a valid code this account never previewed returns `not_found`, and reveals nothing else.
-11. An old 11-argument call still places a normal order.
-12. Someone else's personal code returns `not_yours`; a used batch code returns `used`.
-13. No client role can `SELECT` any coupon table or call any `private` function, and `anon` can call `list_offers` and nothing else.
-14. *(Phase 2)* A decline issues exactly one apology code, and the cooldown holds. **A broken programme row doesn't block the decline.**
-15. *(Phase 3)* The referral reward is only issued on delivery, is capped per month, and is never issued for referring yourself.
-
----
-
-## 13. Risks
-
-| Risk | Likelihood | Impact | What limits it |
+| Status | Tracker step | Hero title | Badge tone |
 |---|---|---|---|
-| A public code spreads far beyond its intended audience | High | The budget runs out faster | A required budget or total limit (§3.9); the per-customer limit; pausing takes seconds |
-| A typo in a value (₹5000 instead of ₹50) | Medium | One bad day's margin | The ₹500 ceiling CHECK; the food-is-never-free CHECK; create the coupon switched off, test it, then switch it on |
-| Two customers take the last use | Low | Overspend by one use | The row lock (§9.2); test 3 |
-| An owner uses coupons on their own restaurant | Medium | Money leaks directly | The 026 guard, reused; the `coupon_uses` report |
-| Fake referrals from extra SIM cards | Medium | ₹100 per fake friend | A delivered order is required; the monthly cap; `referral_audit` |
-| The owner dashboard shows the wrong order value | Low (by design) | Partners stop trusting the numbers | The value goes in `discount_amount` (§5.2); the `menuValue` test |
-| A bug in the automatic codes blocks declines or expiries | Low | Orders get stuck | The trigger swallows its own errors (§6.3); test 14 |
-| A customer is confused when a coupon "does nothing" | Medium | Support messages | The coupon-vs-festival copy (§3.7); locked reasons in the sheet |
-| `delete-account` later starts scrubbing `orders.customer_phone` | Low | Signing up again resets "new customer" status | Flagged in §5.3; keep a hashed copy if it happens |
-| GST treatment of discounts RedLotus pays for | Unknown | Tax exposure | A CA question, alongside `v2_deferred_issues.md` §7.9 |
-| Customers start treating coupons as the normal price | Medium | Margins shrink | Prefer personal and event coupons to coupons for everyone; look at `coupon_performance` weekly |
+| `pending` | Order placed | "Waiting for the restaurant" | warning |
+| `accepted` | Confirmed | "Order confirmed" | success |
+| `preparing` | Preparing | "Preparing your food" | success |
+| `out_for_delivery` | On the way | "On the way" | success |
+| `completed` | Delivered | "Delivered" | success |
+| `declined` | (tracker hidden) | "Declined by the restaurant" plus the reason | danger |
+| `expired` | (tracker hidden) | "The restaurant didn't respond in time" | danger |
+| `cancelled` | (tracker hidden) | "You cancelled this order" | neutral (not the red error treatment, as today) |
+
+**Behaviour**
+
+- **Unchanged:** the Realtime channel `order-${id}` (UPDATE, merged into the joined row); the ETA rules (shown for accepted, preparing and on the way only; hidden for pre-014 orders; counts down, then "arriving", then gentle overdue copy); cancel through the `cancel_order` RPC, with the lost-race notice and refetch; the modal auto-dismissing when the status leaves `pending`; the contextual push prompt; the review CTA for completed orders only; the apology card for declined and expired orders.
+- **New (D13):** refetch the order on `visibilitychange` → visible, on Capacitor `App` resume (`appStateChange`) and on any `SUBSCRIBED` status after the first. This mirrors the owner dashboard's reconnect refetch and doesn't add a channel.
+- **Neutral fallbacks (§18 F1):** a null `restaurants` join shows "Your restaurant" in the header; a null `menu_items` join shows "Item" with **no veg mark**, never the non-veg mark.
+- **The receipt** comes from `billLinesFromOrder(order)`, which keeps today's ordering (`receiptDiscountLine` and its `afterDelivery` placement) and the item-total identity (`total + discount − delivery − platform − surge`).
+
+**Acceptance**
+
+- An owner status change shows up within a few seconds.
+- After 5 minutes with the app backgrounded and a status change in between, resuming shows the new status with no manual refresh.
+- Cancel works, and so does the lost-race path.
+- A closed restaurant's order never shows a non-veg mark.
+
+### 8.6 Orders (`/orders`)
+
+- **Two sections:** "In progress" (pending, accepted, preparing, out for delivery), then "Past orders".
+- **Each `Orders/Card` shows:**
+  - restaurant name (with the F1 fallback), date and time, status `Badge` (label from `orderStatus.ts`) and total;
+  - "Rate your order" or "You rated this — Edit" for completed orders;
+  - the collapsed breakdown (today's `<details>`, rendered with `BillDetails`).
+- **Optional item summary:** "2 × Dal Baati, 1 × Lassi". It needs `order_items(quantity, menu_items(name))` added to the select, with the F1 fallback.
+- **Logged out (D5):** a `SignInPanel`, "Log in to see your orders".
+- **Empty:** "No orders yet", with "Explore restaurants" → `/`.
+- **Loading:** 4 order-card skeletons.
+- **Optional pagination:** `.range()` pages of 20 with "Load more". Today's query fetches everything, which is fine at current volumes.
+
+### 8.7 Offers (`/coupons`)
+
+Every behaviour stays; the screen gets a clearer structure:
+
+1. **Pending-code banner** (`?apply=` / `couponStorage`): unchanged logic, restyled.
+2. **"Have a code?"** checker: unchanged. Logged out → sign-in prompt; non-customer → note; customer → `preview_coupon`.
+3. **"Always on" cards (new, real data):**
+   - the festival discount when `isLive` ("11% off on ₹200+, up to ₹50 — applied automatically");
+   - the free-delivery rule from `delivery_config`.
+   - Both hide when not live or not loaded.
+4. **`ReferralCard`:** unchanged; hidden while the programme is off.
+5. **"Your coupons" and "Offers for everyone":** `CouponTicket` rows with today's aside logic (Use, a lock label, Expired).
+6. **Empty:** "No offers right now — check back around festivals." (today's copy).
+
+**Acceptance:** "Use" still stores the pending code and routes to checkout (with items) or Home (without); checkout still validates it with `preview_coupon` before applying.
+
+### 8.8 Profile (`/profile`) and Saved addresses (`/profile/addresses`)
+
+```
+┌────────────────────────────────────┐
+│ Profile                            │
+│ ┌────────────────────────────────┐ │
+│ │ (A) Ankit Khatkar        Edit  │ │  Profile/Header
+│ │     +91 98765 43210 ✓ Verified │ │
+│ └────────────────────────────────┘ │
+│  ▤ Your orders                  ›  │  ListRow
+│  ⌂ Saved addresses              ›  │  → /profile/addresses (D11)
+│  % Coupons & offers             ›  │
+│  ☏ Help & support               ›  │  WhatsApp + email
+│  ⓘ About RedLotus               ›  │
+│  § Terms · Privacy              ›  │
+│  ⏻ Log out                         │  signOut() → "/"
+│  Delete account (customers only)   │  danger zone, as today
+│  Version 1.0.14                    │
+└────────────────────────────────────┘
+```
+
+- **The edit form** (name and phone) keeps today's `handleSave` logic. Changing the phone resets verification and routes to `/verify-phone`. It lives behind "Edit" in an expandable card.
+- **Setup mode** (`?setup=true`, the Google gate) shows the form expanded with today's banner. The rows and danger zone stay hidden.
+- **OTP plan §8.8** will make the phone read-only with "Change" (`PhoneOtpForm`). The header is designed so that swap needs no layout change.
+- **Log out** is now also on the page (it calls the existing `signOut`).
+- **Delete account** must stay reachable in-app (Google Play policy). It keeps `DeleteAccountModal`, now on `Dialog`, and the `/delete-account` link.
+- **Saved addresses (D11):** `listAddresses()`. Each row shows the label icon, label, address text, pin status and a "Default" badge. Actions: "Set as default" (`setDefaultAddress`) and "Delete" (`deleteAddress`, behind a `Dialog`). Adding stays in checkout for v1, with a note: "New addresses are saved when you place an order."
+- **Logged out (D5):** a `SignInPanel`, plus the rows that don't need an account (Help, About, Terms, Privacy).
+
+### 8.9 Auth screens: the boundary with the OTP plan
+
+`/login`, `/signup`, `/verify-phone`, `/auth/callback` and `/reset-password` are **not** redesigned here. The OTP plan rewrites them (§8 there).
+
+- **If the OTP plan ships first:** this plan's tokens and primitives are adopted when those screens are next touched.
+- **If this plan ships first:** the OTP plan builds `PhoneOtpForm` and the new `/login` on `Button`, `SearchField`-style inputs and the tokens.
+
+Neither plan changes the other's logic. `SignInPanel` links to `/login`, and adds `?next=` once that parameter exists.
+
+### 8.10 Owner surfaces: guardrails only
+
+- The owner dashboard, menu manager and reviews manager keep `Navbar` and their own CSS. No owner file is edited.
+- Owners never see the bottom nav (§7.3), and `/` still redirects them to `/dashboard`.
+- The new-order chime, Realtime, push and the `useNewOrderAlert` singletons are untouched.
+- **Regression check:** owner login → dashboard renders → a test order arrives → accept and progress → the customer's tracker updates (§15.2).
 
 ---
 
-## 14. Later (v2)
+## 9. Loading, empty, error and offline states
 
-- **Free dish / buy one get one** (D3). This needs rules for specific dishes and a way to put a ₹0 line on the order.
-- **Offers the restaurant pays for.** The partner would pay, set them up from their dashboard, and see them on order tickets and on their statement. This needs a `funded_by` column on `coupons`, a payout change in `order_settlement`, and the partner's consent.
-- **An admin page**, if coupon management moves off the Dashboard (the triggers in `v2_deferred_issues.md` §2).
-- **"Your coupon expires tomorrow" reminders**: a second daily job.
-- **An apology for late delivery**, when an order arrives well after its promised time (014). This needs a reliable delivery time; today the owner's "Delivered" tap can come some time after the actual drop-off.
-- **SMS for customers who only use the website.** This needs a DLT *promotional* template, and promotional SMS can't reach DND numbers or be sent after 9 PM.
-- **Applying the best coupon automatically**, but only if data shows customers are missing coupons they would have used.
-- **Budget alerts**: a push to Ankit when a coupon has spent 80% of its budget.
+Rules:
 
----
+- **Never a blank screen.** Skeletons match the layout they replace.
+- **Error copy is always humanised.** Supabase errors pass through `humaniseSupabaseError`. `couponsApi` and `reviews.ts`'s submit path already wrap errors before throwing. `reviews.ts`'s read helpers throw raw errors, which today's callers swallow; keep it that way, or wrap them before any screen renders one. `EmptyState` takes a string, never an `Error`.
+- **Every state names the next action.**
 
-## 15. Implementation phases
-
-### Phase 1: the engine, and every code you create by hand
-
-- [ ] Migration `0NN_coupons.sql`:
-  - [ ] the `private` schema;
-  - [ ] `coupons`, `coupon_codes` and `coupon_lookups`, with their triggers, CHECKs and grants;
-  - [ ] the new `orders` columns and indexes;
-  - [ ] the internal functions: `private.normalise_coupon_code`, `new_coupon_code`, `coupon_is_live`, `coupon_amounts`, `coupon_check`;
-  - [ ] `preview_coupon` and `list_offers`;
-  - [ ] `place_order` v5, dropping the 11-argument version;
-  - [ ] the admin helpers `coupon_generate_batch` and `coupon_issue_personal`;
-  - [ ] the report views, and the updated settlement and margin views.
-- [ ] Scripts:
-  - [ ] `ops/0NN_verify.sql` and `ops/0NN_rollback.sql`;
-  - [ ] the preview end-to-end script (tests 1–13);
-  - [ ] sample coupons in `seed.sql`;
-  - [ ] update `ops/023_verify.sql`.
-- [ ] Client logic:
-  - [ ] `src/lib/coupons.ts` with tests, `couponsApi.ts` and `couponStorage.ts`;
-  - [ ] the coupon argument in `pricing.ts`, with tests;
-  - [ ] the `menuValue` test.
-- [ ] Checkout:
-  - [ ] the coupon row, the coupon sheet, error handling and the pending code;
-  - [ ] the coupon line in `ConfirmOrderModal`.
-- [ ] Receipts: `OrderStatus` and `OrderHistory` labels.
-- [ ] Coupons page:
-  - [ ] `/coupons` (enter a code, your coupons, offers) with `?apply=`;
-  - [ ] links from `AppTopBar` and `Profile`.
-- [ ] `delete-account`: revoke personal codes.
-- [ ] Legal text: Terms of Service §10 (after D14 sign-off) and the Privacy Policy line.
-- [ ] Regenerate `database.ts`.
-
-### Phase 2: automatic codes
-
-- [ ] Migration `0NN_coupon_programs.sql`:
-  - [ ] `coupon_programs`, seeded switched off, with template coupons;
-  - [ ] `private.issue_program_code` and the status trigger;
-  - [ ] `issue_winback_coupons()`.
-- [ ] `send-push`: add the coupon line to declined, expired and delivered pushes.
-- [ ] Edge Function `coupon-jobs`, plus the daily `pg_cron` job (created in the SQL Editor).
-- [ ] `OrderStatus`: the apology card. "Your coupons": the reason subtitles.
-- [ ] End-to-end test 14.
-
-### Phase 3: referrals and campaigns
-
-- [ ] Migration `0NN_referrals.sql`:
-  - [ ] the referral coupon and reward template;
-  - [ ] `get_my_referral_code()`;
-  - [ ] the reward branch in the trigger, with its advisory lock;
-  - [ ] `private.referral_audit`;
-  - [ ] `promo_broadcasts` and `promo_push_audience()`.
-- [ ] The "Refer friends" card with WhatsApp sharing, on `/coupons` and in `Profile`.
-- [ ] `send-push`: the referrer's reward push.
-- [ ] Edge Function `promo-broadcast`.
-- [ ] Offer lines on discovery cards and pills on the menu page.
-- [ ] End-to-end test 15.
+| State | Where | Title / body (draft; existing copy kept where it exists) | Actions |
+|---|---|---|---|
+| Location: unsupported · denied · unavailable · timeout · inaccurate | Home, Search | Today's `LOCATION_STATE_CONFIG` copy | Retry and override where today allows; WhatsApp |
+| No restaurants deliver here | Home, Search | Today's `NONE_IN_RANGE_CONFIG` | "Show restaurants anyway", WhatsApp |
+| All kitchens closed | Home | Today's `NO_RESTAURANTS_CONFIG` | WhatsApp |
+| Couldn't load restaurants | Home | "Couldn't load restaurants" + the humanised error | Try again, WhatsApp |
+| No search results / empty category | Search | Today's `noMatchConfig` / `noCategoryConfig` | Category suggestions, WhatsApp |
+| Restaurant unavailable | Restaurant | "This kitchen isn't taking orders right now" | "See open restaurants" |
+| Menu being updated | Restaurant | Today's copy | Back |
+| Empty cart | Checkout | "Your cart is empty" / "Find something delicious nearby." | "Explore restaurants" |
+| Delivery pricing / restaurant geo failed | Checkout | Today's notices | Try again |
+| No orders | Orders | "No orders yet" | "Explore restaurants" |
+| Order not found / failed to load | Order detail | "We couldn't load this order" + the humanised error | Try again, back to Orders |
+| No offers | Offers | Today's copy | "Explore restaurants" |
+| No saved addresses | Saved addresses | "No saved addresses yet" | "Order now: we'll save it at checkout" |
+| Logged out on a tab | Orders, Profile | "Log in to see your orders" / "Log in to manage your account" | "Log in" |
+| Offline (native) | Everywhere | Today's `NativeBridge` banner, above the bottom bars | none (it clears on reconnect) |
+| Offline (web, optional) | Everywhere | The same banner from `navigator.onLine` events | none |
+| Render crash | Anywhere | `ErrorBoundary`, restyled; the contact number comes from `lib/contact.ts` | Reload, WhatsApp |
 
 ---
 
-## 16. Doc updates when this ships
+## 10. Motion
 
-- **CLAUDE.md** and its `GEMINI.md` mirror:
-  - [ ] add the `/coupons` route;
-  - [ ] update the `place_order` rule (13 arguments, `COUPON_INVALID:`);
-  - [ ] add a coupons critical rule: the value lives in `discount_amount`, there are no client grants, internals live in the `private` schema, and the Boundedness Invariant applies;
-  - [ ] update the RLS summary;
-  - [ ] update the file map (`coupons.ts`, `couponsApi.ts`, `couponStorage.ts`, `/coupons`, `coupon-jobs`, `promo-broadcast`);
-  - [ ] remove "promo codes" from the v2-deferred list;
-  - [ ] update the discount bullet under the business constraints.
-- **`v2_deferred_issues.md`**: add a section for the simplifications in coupons v1 (§14).
-- **`pre_production_checklist.md`**: strike "No discount/promo UI".
-- **`business_plan.md` §5.3.5** and **`redlotusfoods_documentation.md` §6.7**: mark them as superseded by this plan.
+| Interaction | Animation | Duration / easing | Reduced motion |
+|---|---|---|---|
+| ADD → stepper | Crossfade plus a width change | 200 ms standard | Instant |
+| Quantity change | The number slides 4 px | 120 ms | Instant |
+| Item added | The cart bar scales 1 → 1.04 → 1 and the count updates (`aria-live`) | 200 ms | Count update only |
+| Sheet open / close | translateY 100 % → 0 and backdrop fade | 320 ms decelerate / 200 ms accelerate | Fade only |
+| Dialog | Scale 0.96 → 1 and fade | 200 ms | Fade only |
+| Stack navigation | React Router `viewTransition` (View Transitions API; RR 8.3 exposes `viewTransition`): fade plus 8 px slide | 200 ms | None |
+| Skeleton | One shared `rl-shimmer` gradient | 1.2 s loop | Static |
+| Live tracker step | `rl-pulse` ring | 1.6 s loop | Static |
+| Press feedback | Opacity 0.72, as in today's `index.css` | Immediate | Same |
+| Header turns solid on scroll | Background and shadow | 200 ms | Instant |
+
+**Not allowed:** a flying image into the cart, parallax, Lottie, any JavaScript animation library, and animating `width`, `height` or `top` on long lists. Only `transform` and `opacity` animate (plus the stepper's width change).
+
+---
+
+## 11. Accessibility
+
+- **Contrast:** every text token in §5.2 reaches AA (4.5:1) against the backgrounds it is used on; UI component boundaries reach 3:1.
+- **Not colour alone:** veg marks are shape-coded (D9); status badges carry text; errors carry an icon.
+- **Targets:** at least 44 × 44 px (48 for navigation). Carousel dots get a 24 px hit area (WCAG 2.2 target size).
+- **Focus:** a visible `:focus-visible` ring (2 px brand outline, 2 px offset) on every interactive element. Overlays trap focus and restore it.
+- **Semantics:**
+  - one `<main>` per screen;
+  - `<nav aria-label="Main">` for the bottom nav, with `aria-current="page"`;
+  - a heading order of h1 per screen, then h2 per section;
+  - lists as `<ul>`;
+  - a real `<button>` or `<a>`, never a clickable `div`.
+- **Live regions:** the cart bar count ("2 items, ₹310"), the order status hero, and coupon and checkout notices (`role="status"`, or `role="alert"` for danger).
+- **Labels:**
+  - icon-only buttons have `aria-label` (enforced by type);
+  - the veg mark has "Vegetarian" or "Non-vegetarian";
+  - the rating reads "Rated 4.3 out of 5 from 128 ratings" (today's pattern);
+  - images use `alt` = the restaurant or dish name, or `alt=""` when the name is already adjacent text.
+- **Text scaling:** layouts hold at 130 % system font (Android) and 200 % browser zoom (web).
+- **Language:** `<html lang="en">` stays. Devanagari names fall back to the system font: Plus Jakarta Sans has no Devanagari glyphs.
+
+---
+
+## 12. Performance
+
+### 12.1 Baseline
+
+Taken from `npm run build` on 2026-10-05, `main` @ `76e4a1f`. Gzip figures are measured with `gzip -c` (level 6).
+
+| Chunk | Raw | Gzip |
+|---|---|---|
+| `index` JS (storefront, router, contexts) | 390.6 kB | ~124 kB |
+| `supabaseClient` JS | 196.3 kB | ~50 kB |
+| `jsx-runtime` JS | 28.1 kB | ~10.5 kB |
+| `Checkout` JS | 29.6 kB | ~8.2 kB |
+| `OrderStatus` JS | 11.9 kB | |
+| `CouponsPage` JS | 9.0 kB | |
+| `RestaurantMenu` JS | 8.1 kB | |
+| `Profile` JS | 6.0 kB | |
+| `OrderHistory` JS | 4.2 kB | |
+| `index` CSS | 32.1 kB | ~6.3 kB |
+
+### 12.2 Budgets
+
+- The `index` JS gzip grows by **at most 15 kB**: shell, tokens and primitives together.
+- Each route chunk stays at or under 30 kB gzip. The new `SearchPage` stays at or under 12 kB gzip.
+- Total customer-route CSS doesn't grow. Shared primitives should shrink it as screens migrate.
+- **No new runtime UI dependencies.** No framer-motion, no component library, no Tailwind. `lucide-react` stays per-icon.
+- Fonts (D10): only the latin subset and only the weights in use (400 / 500 / 600 / 700 sans, 400 serif). Preload the two most-used files. Measure the total and record it in Phase 1.
+- The customer path never downloads the owner chunk (CLAUDE.md invariant).
+
+### 12.3 Practices
+
+- **Images**
+  - Give every image `width` and `height` or an aspect-ratio box (no layout shift), `loading="lazy"` and `decoding="async"`.
+  - Only the first card's lead image is eager, with `fetchpriority="high"`.
+  - Supabase image transformations would cut bytes but are a paid add-on. Off by default; §18 F8.
+- **Lists.** At current scale (about 16 restaurants, menus up to about 150 dishes) no virtualisation is needed. `content-visibility: auto` on the menu's full list and on reviews is allowed.
+- **Search.** A 200 ms debounce; memoise normalised haystacks per dataset; the dish fetch stays lazy and scoped.
+- **Data.**
+  - `BrowseProvider` removes the restaurant refetch on every Home visit.
+  - **No new Realtime channels.** D13 adds refetches, not subscriptions.
+  - A bottom-nav "active order" badge would need a query or subscription on every screen, so it is deferred.
+- **Rendering.** Memoise the derived lists (nearby, featured, top rated, results); keep context values stable; components read only the context slice they need.
+- **Measure** at the end of each wave: the build sizes table above, Lighthouse mobile on a Vercel preview for `/` and `/restaurants/:id`, and Vercel Speed Insights field data after release.
+
+---
+
+## 13. Figma workflow (MCP)
+
+### 13.1 Account and limits
+
+Checked 2026-10-05 with `whoami` and Figma's documentation (sources in §21):
+
+| Fact | Value | Consequence |
+|---|---|---|
+| Plan · seat | Starter · Full (team admin) | MCP access with per-day limits |
+| MCP limits (Starter, Full seat) | Up to **200 calls a day, 10 a minute**. Exempt: `whoami`, `create_new_file`, `add_code_connect_map`. | Assume every `use_figma` and `get_*` call counts. §13.8 budgets them. |
+| Files and pages (Starter) | **3 design files with at most 3 pages each**; 3 FigJam files; one project | One design file with exactly 3 pages, plus one FigJam file |
+| Variable modes | At least 1 per collection (Starter allows a few) | The design needs one mode, "Light" |
+| Code Connect | **Organization / Enterprise only** | No Code Connect. Map by naming convention (§13.6). |
+| Team libraries | Publishing needs a paid plan | Components stay local to the one file, which is fine with a single file |
+
+### 13.2 Files and pages
+
+- **Design file "RedLotus — Customer App"**, in Ankit's team project:
+  1. **Foundations:** a cover frame (status, owner, a link to this doc, last sync date), the brand (logo-mark, wordmark, do and don't), colour, type, space, radius and elevation specimens, and the icon rules.
+  2. **Components:** sections Primitives, Overlays, Shell, Restaurant, Menu, Checkout, Orders, Offers, Profile.
+  3. **Screens:** sections `00 Baseline (current app)`, `01 Home`, `02 Search`, `03 Restaurant`, `04 Checkout`, `05 Order tracking`, `06 Orders`, `07 Offers`, `08 Profile`, `09 States`, `10 Tablet & desktop`, `11 Prototype: critical flow`.
+- **FigJam file "RedLotus — App IA & Flows":** the IA map, the critical flow (§15.2), the back-button rules (§7.5) and the data-source map (§3). Built with `generate_diagram`.
+- **Frame naming:** `Home — Default — 360`, `Home — Loading — 360`, `Home — Location denied — 360`, and so on.
+- **Approval marker:** each section carries a status label: `Draft`, `In review` or `Approved (date)`.
+
+### 13.3 Build order in Figma
+
+1. **Variables**
+   - A `Primitives` collection (hidden; scopes `[]`) with the raw palette and spacing values.
+   - A `Tokens` collection (mode "Light") aliasing them under the §5 paths.
+   - Scopes on every variable: backgrounds → `FRAME_FILL, SHAPE_FILL`; text → `TEXT_FILL`; borders → `STROKE_COLOR`; spacing → `GAP`; radii → `CORNER_RADIUS`.
+   - WEB code syntax `var(--rl-…)` on every one.
+2. **Styles:** the text styles in §5.3 and the effect styles `Elevation/1`, `Elevation/2`, `Elevation/3` and `Elevation/Brand`.
+3. **Components** in dependency order: primitives → overlays → shell → domain.
+   - Auto layout throughout, with every fill, stroke, padding, gap and radius bound to variables.
+   - Icons use `INSTANCE_SWAP`; never one variant per icon.
+   - Split any variant matrix larger than 30.
+4. **Screens**, built only from component instances and tokens. Every state listed in §8 and §9 gets a frame.
+5. **Prototype:** connect the critical-flow frames for Ankit's click-through review.
+
+### 13.4 The screen design loop
+
+1. Claude drafts the screen in Figma from §8 with components, loading `figma-use` and `figma-generate-design` first.
+2. Claude takes a screenshot and self-checks for clipping, truncation, contrast and overflow at 360 px.
+3. Ankit reviews in Figma (comments) or in chat.
+4. Claude iterates; only the frames that changed are touched.
+5. Ankit marks the section **Approved**. Coding that screen starts only after this.
+
+### 13.5 From design to code
+
+For each approved frame or component:
+
+1. Load the `figma-design-to-code` skill, then call `get_design_context` on the node with a screenshot. Use `get_variable_defs` to confirm the token bindings.
+2. **Adapt, don't paste.** The tool returns React plus Tailwind-flavoured reference code. Translate it into this repo's conventions: plain co-located CSS, `var(--rl-…)` tokens, the `src/components/ui` primitives, real data from the existing hooks, and no absolute positioning unless it is genuinely fixed.
+3. Download any static asset the design uses through the tool's asset flow. Data imagery (restaurant and dish photos) stays dynamic.
+4. Render the screen (`npm run dev` at 360 px, or a preview build) and compare it with the Figma screenshot. Fix the differences in scope and note anything pre-existing that is out of scope.
+5. If the code reveals a constraint the design missed (for example, real names longer than expected), update the Figma frame in the same session. Figma remains the visual source of truth; this doc remains the source of truth for behaviour and data.
+
+### 13.6 Mapping without Code Connect
+
+- **Names match:** the Figma component name equals the React component name (§6 tables).
+- **Props match:** Figma variant property names equal the React prop names (`variant=primary`, `size=md`). Figma-only properties (`state=pressed`) are marked as such in the component description.
+- **Every component description** carries its code path and props, for example `React: src/components/ui/Button.tsx · props: variant, size, loading, fullWidth, iconStart, iconEnd`.
+- **Every token** has WEB code syntax, so generated code references `var(--rl-…)`.
+- If the plan is ever upgraded to Organization, these descriptions become the Code Connect source.
+
+### 13.7 Real content in Figma
+
+- **Restaurants and menus:** the public catalogue: real names, cuisines, prices, descriptions, images and ratings, the same data any visitor sees through the anon API. Real long names are used to test truncation.
+- **Orders and receipts:** one of Ankit's own test orders, or seed data on a preview branch, labelled as such. No other customer's personal data goes into Figma.
+- **Missing data stays missing.** No rating means "New"; no image means no image; no promotions means the carousel is absent.
+- **The baseline section** holds screenshots of today's screens for before-and-after comparison.
+
+### 13.8 Call budget
+
+| Activity | Calls (estimate) |
+|---|---|
+| Setup (`whoami`, `create_new_file` × 2) | 0 counted (exempt) |
+| Foundations (variables, styles, specimens, review screenshots) | 15–25 |
+| Primitives and overlays (~20 components with variants) | 50–80 |
+| Shell and domain components (~20) | 50–80 |
+| Screens (9 screens × default + 3–6 states at 360 px) | 90–140 |
+| Tablet and desktop reference frames | 10–20 |
+| Review iterations (about +30 %) | 60–100 |
+| Design → code reads (`get_design_context`, `get_screenshot`, `get_variable_defs`) | 80–120 |
+| **Total** | **about 350–550**: 3–4 days' allowance, spread over the phases |
+
+Rules:
+
+- `use_figma` calls run one at a time, never in parallel (a skill rule).
+- Batch related operations into one safe-to-retry script.
+- Take one review screenshot per composition phase.
+- Keep the run ledger (node IDs) in a git-ignored `.figma/` folder. Add it to `.gitignore` in Phase 0. The stable registry (file keys, page IDs, key component IDs) lives in Appendix B of this doc.
+- To resume in a new chat: "Continuing the RedLotus design system build, run ID {id}. Load figma-use and figma-generate-library and resume from the last completed step."
+
+### 13.9 Keeping Figma and code in sync
+
+- A token change happens in `tokens.css` and the Figma variable together, and is recorded in the Appendix B changelog.
+- A component API change (a new prop or variant) is made in both places and its description is updated.
+- **Before each wave ships:** `get_variable_defs` on the approved screens is compared with `tokens.css` (the drift check), and any difference is fixed or recorded.
+
+---
+
+## 14. Implementation phases
+
+Each phase goes Figma first, then code, then tests. Work stays on the integration branch `feat/app-redesign`; per the standing rule, nothing is pushed, opened as a PR, merged, deployed or uploaded to OTA without Ankit's review (§16).
+
+| Phase | Goal | Figma | Code | Tests and checks | Exit criteria | Wave |
+|---|---|---|---|---|---|---|
+| **0 · Prep** | Decisions and baseline | Create the design file and FigJam file; IA and critical-flow diagrams; import baseline screenshots | Add `.figma/` to `.gitignore`. Nothing else. | Record build sizes (done, §12.1), test count (312) and Lighthouse for `/` and `/restaurants/:id` on a preview | D1–D17 answered; Appendix C run; Figma files exist | — |
+| **1 · Foundations** | One token set in both places | Variables, text and effect styles, the Foundations page | `src/styles/{tokens,base,motion}.css`; fonts self-hosted (D10); `formatRupees` and `formatDistance` in `format.ts` with parity tests; `lib/contact.ts` | `npm test`, lint, build; screenshots of every customer screen show no unintended change | Tokens match (drift check passes) | A |
+| **2 · Primitives and overlays** | Reusable building blocks | Components page: primitives and overlays | `src/components/ui/*`; `lib/backStack.ts`; `NativeBridge` back-stack hook-in | Render tests: Sheet and Dialog (focus trap, ESC, back handler, busy), `AddToCartControl` states, `VegMark` labels; `backStack` unit tests | Primitives approved in Figma and matching in code | A |
+| **3 · Shell and navigation** | One navigation system | Shell components; tab-screen frames | `CustomerShell`, `BottomNav`, `AppHeader`, `CartBar`, `StickyActionBar`, `ScrollManager`; route restructure; back rules (§7.5); system-bar colours; keyboard attribute. Tab screens not yet redesigned get the `title` header and a token pass instead of `Navbar`, so no screen shows two navigations. | `navVisibility` tests; manual back-button matrix on a device | Every customer screen has exactly one navigation system | A |
+| **4 · Home and Search** | Discovery | Home and Search screens with all states | `BrowseProvider` (pure move, then `decideFix` with tests); Home recomposed; `SearchPage`; `recentSearches` | `browseOrigin` and `recentSearches` tests; search parity check against today's results; the location state walkthrough (all 5 states + override + disclosure) | §8.1 and §8.2 acceptance | A |
+| **5 · Restaurant and dish cards** | Menu | Restaurant screen and states; dish rows | `RestaurantHero`, `OfferStrip`, `MenuToolbar`, `DishRow`; D4 public route; the unavailable state | Cart behaviour walkthrough; replace-cart; logged-out menu | §8.3 acceptance → **Wave A release candidate** | A |
+| **6 · Cart and Checkout** | Transaction | Checkout and all its states; dialogs and sheets | JSX split into sections; `billLines.ts`; `checkoutGate.ts`; sticky footer; D7 in its own commit | Bill-line and gate tests; `pricing`, `coupons` and `CouponSheet` tests unchanged; §15.2 rows 8–13 | §8.4 acceptance | B |
+| **7 · Orders and tracking** | After the order | Tracking, history and states | `OrderStatusHero`, `OrderStatusTracker`, `OrderCard`, `orderStatus.ts`; D13 refetch; F1 fallbacks | `orderStatus` tests; Realtime and resume test with the owner dashboard | §8.5 and §8.6 acceptance | B |
+| **8 · Offers and Profile** | Account and offers | Offers, Profile and Saved addresses | Restyled `CouponsPage`; `Profile`; `SavedAddresses` (D11) | Coupon flows unchanged; delete account reachable; set-default and delete | §8.7 and §8.8 acceptance → **Wave B release candidate** | B |
+| **9 · States, motion, a11y, performance** | Polish | The states section; prototype review | Missing skeletons and empty states; motion; a11y fixes; performance tuning | §15.5 and §15.6 | Budgets met; TalkBack pass | A + B |
+| **10 · Verify and release** | Confidence | Final drift check | Regression fixes; docs sync (§19) | The full §15 matrix; `npm test`, `npm run lint`, `npm run build`, `npm run build:cap` | Ankit's sign-off → release (§16) | A, then B |
+
+---
+
+## 15. Testing and verification
+
+### 15.1 Automated (Vitest; the CLAUDE.md scope stays pure-logic-first)
+
+| New test file | What it pins |
+|---|---|
+| `lib/format.test.ts` (extend) | `formatRupees` / `formatDistance` give the same output as today's helpers for 0, 50, 180, 180.5, 1234.25 and for 0.35 km and 1.2 km |
+| `lib/billLines.test.ts` | Checkout lines for every `discountSource` and waiver case; receipt lines for pre-022, 022 and 027 orders; `afterDelivery` ordering; null fee → a pending marker, never 0 |
+| `lib/checkoutGate.test.ts` | `checkoutBlocker(x) === null` exactly when `canPlaceOrder(x)`, across the input space; blocker precedence |
+| `lib/browseOrigin.test.ts` | `decideFix` for every row of the location-resilience edge-case table |
+| `lib/navVisibility.test.ts` | §7.3 matrix |
+| `lib/backStack.test.ts` | LIFO order, unregister, the busy handler returning false |
+| `lib/recentSearches.test.ts` | Dedupe, cap of 8, clear, corrupt storage |
+| `lib/orderStatus.test.ts` | A label and tone for every enum value (the test fails if a new status is added without one) |
+| `components/ui/Sheet.test.tsx`, `Dialog.test.tsx` | Focus moves in and is trapped and restored; ESC; backdrop; the back handler; busy blocks closing |
+| `components/ui/AddToCartControl.test.tsx` | 0 → ADD; n → stepper; decrementing at 1 removes |
+| `components/ui/VegMark.test.tsx` | Accessible names; renders nothing for unknown |
+
+The existing 312 tests must pass unchanged, especially `pricing.test.ts`, `coupons.test.ts`, `CartContext.test.tsx`, `CouponSheet.test.tsx` and `locationCache.test.ts`. No mocked Supabase (CLAUDE.md).
+
+### 15.2 The critical flow (the brief's §26, adapted to RedLotus)
+
+Run it per wave on every platform in §15.3. **Pay** becomes **place the order (cash on delivery)**.
+
+| # | Step | How | Pass when |
+|---|---|---|---|
+| 1 | Open the app | Native cold start; web `/` | The splash hides; Home renders from cache with no spinner for a returning user; no layout jump |
+| 2 | Select a location | Header → sheet: GPS / saved / "Browse all of Gudha Gorji"; first native run | The label updates and the list re-filters by each restaurant's radius; the disclosure precedes the OS prompt |
+| 3 | Search a restaurant or dish | Search tab, a query, a category chip, recent searches | Results stay inside the radius; the veg filter works; results match today's |
+| 4 | Open a restaurant | Tap a card while logged out (D4) | The menu loads with no login; distance shows |
+| 5 | View the menu | Scroll; in-menu search; veg toggle | The toolbar sticks; filters are client-side; Top rated shows only above its threshold |
+| 6 | Add food | ADD on a dish; then a dish from another restaurant | Stepper appears; the replace-cart dialog shows; the cart survives a reload |
+| 7 | Change quantity | Stepper up and down to 0 | The line is removed at 0; the cart bar updates and is announced |
+| 8 | Apply a coupon | Offers → "Use" (pending code) or checkout → sheet → code | Validated by `preview_coupon`; locked and beaten-by-festival states shown; invalid → message; `COUPON_INVALID:` at placement → dropped, re-priced, confirm again |
+| 9 | Open the cart | Cart bar → `/checkout` (log in and verify the phone if needed) | The cart is intact after login |
+| 10 | Proceed to checkout | Review the sections | The fee shows "—" or a skeleton until known, never ₹0; the hint and notices are right |
+| 11 | Select an address | Saved (D7 pre-select) / GPS pin / typed | Out of area → blocked with the footer reason; no pin → blocked; `DELIVERY_TOO_FAR:` copy if the server refuses |
+| 12 | Place the order (COD) | "Place order · ₹X" → confirm dialog → "Yes, place order" | The surge flip and `PRICING_MISMATCH` paths behave as today; no submit at an unseen total |
+| 13 | The order is created | `place_order` → `/orders/:id` | The cart and checkout coupon are cleared; an opted-in new address is saved |
+| 14 | The status updates | The owner accepts with an ETA, then progresses on the dashboard | The tracker and ETA update within seconds; after the app is backgrounded and resumed, the status is correct (D13) |
+| 15 | Order tracking | Watch it through to delivered; cancel a pending order; a declined order | Labels, the ETA window, the lost-race notice, the apology card and the review CTA all work |
+| 16 | Order history | `/orders` | The order appears under In progress, then Past; Rate and Edit work |
+
+**Owner regression:** owner login → `/dashboard`, with no customer shell → the new-order chime → accept and progress → the customer side updates → `/` redirects back to `/dashboard`.
+
+### 15.3 Platforms and devices
+
+| Target | Notes |
+|---|---|
+| Native Android, Ankit's Samsung (Android 16) | A debug build from `npm run build:cap`, then the wave bundle on the Capgo `staging` channel |
+| An older or low-end Android (10–13), if one is available | Edge-to-edge differences, WebView performance |
+| Android Chrome (web / PWA) | Gesture back, `100dvh`, keyboard |
+| iPhone Safari (web / PWA) | Safe-area insets, 16 px inputs (no zoom), the Share → A2HS hint |
+| Desktop Chrome at 1280 and 1440 | The desktop header and the checkout's right column |
+| Viewports | 320 (no sideways scroll), 360 × 800, 393 × 873, 412 × 915, 768 × 1024, 1280 × 800 |
+| Stress | Android system font set to Large; 200 % browser zoom; DevTools "Slow 4G" + 4× CPU slowdown |
+
+### 15.4 Business-logic invariants to re-verify
+
+1. Pricing is computed only by `computeCartPricing`. With no delivery config, every fee field is null, the UI shows a skeleton or "—", and placing is blocked (Principle 1).
+2. `canPlace` is unchanged, now `canPlaceOrder` in `checkoutGate.ts`, moved verbatim.
+3. Re-pricing at tap time; the two-step confirm with default focus on "Go back"; errors shown inside the dialog.
+4. The `place_order` arguments: coupon keys only when a coupon is in use; commission never claimed.
+5. Error prefixes: `COUPON_INVALID:`, `DELIVERY_TOO_FAR:`, `DELIVERY_PIN_REQUIRED:` and `PRICING_MISMATCH:` (with a config reload and the reload button).
+6. The address is saved only after the order succeeds; the delivery pin is required; the geofence uses the ordering restaurant's radius.
+7. Coupons: the pending code wins over the saved checkout coupon; `preview_coupon` before any apply; a re-check when the confirm dialog opens; one coupon or the festival discount, never both.
+8. The cart: single-restaurant lock; replacing confirms first; persisted in `localStorage`; the item total only before checkout.
+9. The geolocation engine invariants (§7.9).
+10. Search semantics (token-AND, scoped dish fetch) and category matching.
+11. Order status: the Realtime merge, cancel via the RPC with lost-race handling, ETA states, the contextual push prompt, the review CTA for completed orders only, the apology card for declined and expired.
+12. Receipts render from the stored snapshot, never live config.
+13. Reviews go through `submit_order_review` only.
+14. Delete account: customers only; hidden in setup mode; reachable in-app; the public `/delete-account` page.
+15. `ProtectedRoute`'s phone-verification gates are unchanged (except D4 and D5, which are deliberate).
+16. `NativeBridge`: OAuth return, App Links, push taps, Capgo health signal and splash timing are unchanged.
+17. Owners never see the customer shell; `/` redirects them.
+18. Copy: never "app", "download" or "install" (`InstallPrompt` excepted); "Place order", never "Pay".
+
+### 15.5 Accessibility checks
+
+- A TalkBack walkthrough of §15.2 on the native app.
+- A keyboard-only walkthrough on desktop (focus order, traps, ESC).
+- Token contrast re-checked with a contrast tool.
+- Optionally, axe in the browser on each screen. It is a manual run, not a dependency.
+
+### 15.6 Performance checks
+
+- The §12.1 table is re-measured; the §12.2 budgets are met or the overrun is explained to Ankit.
+- Lighthouse mobile on the preview for `/` and `/restaurants/:id` is no worse than the Phase 0 baseline.
+- No new long tasks while scrolling the menu (Chrome Performance panel at 4× CPU slowdown).
+
+---
+
+## 16. Release and rollback
+
+### 16.1 Rules
+
+- **Ankit reviews before anything leaves this machine.** Work stops at the local branch. Pushing, opening a PR (which also creates a Supabase preview branch, harmless here since there are no migrations), merging, deploying and OTA uploads each happen only on his go (a standing rule).
+- **Never deploy during the peak hours** of 12–2 PM and 7–9:30 PM IST. Check the time with PowerShell's `Get-Date`, not Git Bash.
+- **There are no database changes**, so there is no `db push` and no database rollback.
+
+### 16.2 Per wave
+
+1. `npm test`, `npm run lint`, `npm run build` and `npm run build:cap` are all green, and the §15 matrix has passed on a debug build.
+2. On Ankit's go: push the branch and open a PR; the Vercel preview serves web testing.
+3. **Native staging:** upload the bundle to the Capgo `staging` channel and point Ankit's device at `staging`. He tests the real OTA path on his phone.
+4. Merge with a `package.json` version bump. The CI `ota` lane uploads to `production`; Vercel deploys the web build.
+5. Watch Sentry, Vercel Analytics and Speed Insights for 48 hours.
+
+**Rollback:** a Vercel instant rollback to the previous deployment, plus `npx @capgo/cli@latest channel set production in.redlotusfoods.app --bundle <previous version>`.
+
+### 16.3 What would need a store build (optional, not planned)
+
+| Item | Why it's native |
+|---|---|
+| `Keyboard.resizeOnFullScreen: true`, if the keyboard covers inputs under edge-to-edge (§7.7) | Plugin config lives in `android/app/src/main/assets/capacitor.config.json`, which OTA doesn't carry |
+| Haptic feedback (`@capacitor/haptics`) | A new plugin |
+| A new splash screen or launcher icon to match the redesign | `android/app/src/main/res/**` |
+
+The redesign itself needs none of these. If any is wanted, it ships in the next tagged AAB, following CLAUDE.md's native rules.
+
+---
+
+## 17. Risks
+
+| # | Risk | Mitigation |
+|---|---|---|
+| R1 | The geolocation engine regresses during the `BrowseProvider` move | A pure-move commit first; `decideFix` unit tests; a manual walkthrough of all location states, the override, the disclosure and cache hydration |
+| R2 | A checkout pricing or placement regression | No logic edits (§8.4); the logic block is diffed in review; existing tests unchanged; new gate and bill-line tests; manual §15.2 rows 8–13 |
+| R3 | Back-button changes confuse users | Explicit rules (§7.5), device-tested; the web is unchanged |
+| R4 | Sticky bars collide with the keyboard or insets on Android 15 and 16 | The keyboard attribute hides them; device tests; the §16.3 fallback |
+| R5 | Bundle growth | Budgets (§12.2) measured per wave; no new dependencies |
+| R6 | Users see a mixed old and new app | Two waves (D14); tab screens get the header and token pass in Wave A (Phase 3) |
+| R7 | The Figma Starter limits (200 calls a day, 3 pages) | §13.8 budget; batched scripts; the 3-page structure; upgrade path (D15) |
+| R8 | A collision with the OTP plan (`/login`, `ProtectedRoute`, Profile's phone row) | §8.9 boundary; whichever lands second rebases; shared primitives |
+| R9 | Play policy regressions | `LocationDisclosure` before any prompt and delete account reachable in-app are both in §15.4; the store screenshots are refreshed after release (§19) |
+| R10 | Owners exposed to the customer shell | The role check in `shouldShowBottomNav`; the redirect kept; owner regression in §15.2 |
+| R11 | Rails look empty or misleading with sparse data | Thresholds (D12); the hide-when-empty rules carried over from today |
+| R12 | A text-scaling or low-end performance surprise | §15.3 stress row; no fixed text heights; CSS-only motion |
+| R13 | The ScrollManager or View Transitions misbehave in the WebView | Feature-detect View Transitions (no-op where unsupported); the scroll manager is tested on the device |
+
+---
+
+## 18. Adjacent findings (not fixed by this plan)
+
+Found while auditing. Each needs its own small plan or migration and Ankit's go.
+
+| # | Finding | Impact | Suggested fix |
+|---|---|---|---|
+| **F1** | Customers can read only **open** restaurants and their **available** dishes (`restaurants_customer_select` and `menu_items_customer_select`, 002). Order history and order status join `restaurants(name)` and `menu_items(name, is_veg)`, so after closing time those joins come back null. | History shows "Restaurant"; the order page shows a blank restaurant name and "Item" for every dish, and renders the **non-veg** mark for a veg dish (`oi.menu_items?.is_veg` is falsy). This plan adds neutral fallbacks (§8.5). | Snapshot `restaurant_name` on `orders` and `item_name` / `is_veg` on `order_items` in `place_order`, or a SECURITY DEFINER order-detail RPC |
+| **F2** | `authenticated` holds a **table-level** SELECT on `restaurants` (restated in 023). Only `anon` got the 016 column grant. | Any signed-in customer can read `restaurants.phone` and `owner_id` of open restaurants through the REST API, against CLAUDE.md's "never expose to customers" rule. The UI never selects them. | Revoke the table grant and add a column grant for `authenticated` (the 016 doctrine), after checking which columns the owner dashboard reads |
+| F3 | Two WhatsApp numbers are in use (D17 / OTP plan D10) | Inconsistent support channel | Answer D17; `lib/contact.ts` makes the switch a one-line change |
+| F4 | `Navbar` links admins to `/admin` and `/admin/orders`, which don't exist | Dead links for the admin | Remove them, or point them to `/` |
+| F5 | Dead weight: `public/icons.svg` (a Vite template leftover, unreferenced); the `styled-components`, `@types/styled-components`, `babel-plugin-styled-components` and `react-router-dom` dependencies (none imported) | Housekeeping | A separate dependency PR. It changes the lockfile, so follow CLAUDE.md's `npm ci` / `--legacy-peer-deps` rule. |
+| F6 | The Play Store graphics use a bold sans "RedLotus" wordmark; the app uses DM Serif Display | Brand inconsistency | Decide on one wordmark when the store screenshots are refreshed |
+| F7 | The `promotions` 1:1 wording in `models.ts` and migration 017 doesn't match the 16:9 carousel | Admins may upload the wrong shape | Fix the comments and the admin guidance (doc-only) |
+| F8 | No image resizing: full-size images are served to 112 px slots | Bandwidth on slow networks | Supabase image transformations (paid) or resized uploads; decide after Phase 9 measurements |
+| F9 | CLAUDE.md still says "Website only — no app" | Stale guidance | Reword to the copy rule that remains: no "app/download/install" language in the UI |
+
+---
+
+## 19. Docs to sync after implementation
+
+- **This file:** status, the decisions as answered, the phase log, and the Figma registry and changelog (Appendix B).
+- **`CLAUDE.md` and `GEMINI.md`**, in lockstep:
+  - the routes table (`/search`, `/profile/addresses`, the public `/restaurants/:id`, tabs and the shell);
+  - the file map (`src/styles`, `components/ui`, `components/shell`, the new libs and pages, `BrowseContext`);
+  - replace "Design tokens: defined locally per component" with the token system;
+  - fonts (self-hosted) in the PWA section;
+  - the `NativeBridge` back rules, system bars and keyboard;
+  - the testing scope additions.
+- **`design.md`:** mark it superseded by §5, or rewrite it as a pointer to the tokens and the Figma file.
+- **`customer_ui_revamp_plan.md`:** a header note that its layout sections are superseded by this plan; its data contract still stands.
+- **`capacitor_native_apps_plan.md`:** the hardware-back rules and the system-bar colour handling.
+- **`v2_deferred_issues.md`:** menu sections, delivery-time estimates, popularity, per-step timestamps, the notification inbox, reorder and the "active order" nav badge. Mark the saved-address management UI as shipped (D11).
+- **`store-listing/`:** retake the screenshots from the redesigned UI; Play requires screenshots to represent the app.
+
+---
+
+## 20. File checklist
+
+**New**
+
+- `src/styles/tokens.css`, `base.css`, `motion.css`
+- `src/components/ui/`: `Button`, `IconButton`, `Chip`, `Badge`, `VegMark`, `RatingPill`, `AddToCartControl`, `SearchField`, `Sheet`, `Dialog`, `Skeleton`, `EmptyState`, `InlineNotice`, `SectionHeader`, `ListRow`, `SegmentedControl`, `Avatar`, `Card` (each with `.css`, and tests where §15.1 lists them)
+- `src/components/shell/`: `CustomerShell`, `BottomNav`, `AppHeader`, `CartBar`, `StickyActionBar`, `ScrollManager`
+- `src/components/restaurant/`: `RestaurantCard`, `RestaurantCardSkeleton`, `RestaurantHero`, `OfferStrip`
+- `src/components/menu/`: `DishRow`, `DishRowSkeleton`, `MenuToolbar`
+- `src/components/checkout/`: `BillDetails`, `CouponRow`, `AddressSection`
+- `src/components/orders/`: `OrderStatusHero`, `OrderStatusTracker`, `OrderCard`
+- `src/components/SignInPanel.tsx`
+- `src/context/BrowseContext.tsx`
+- `src/lib/`: `orderStatus.ts`, `contact.ts`, `billLines.ts`, `checkoutGate.ts`, `navVisibility.ts`, `backStack.ts`, `recentSearches.ts`, `browseOrigin.ts` (+ tests)
+- `src/pages/search/SearchPage.tsx` (+ `.css`), `src/pages/profile/SavedAddresses.tsx` (+ `.css`)
+- Self-hosted font files (location decided in Phase 1)
+
+**Modified**
+
+- `src/App.tsx` (shell layout route, the new routes, D4 and D5), `src/main.tsx` (style imports), `index.html` (fonts)
+- `src/components/NativeBridge.tsx`: additive only (back stack, tab-root rules, system bars, keyboard)
+- `src/context/AuthContext.tsx`: one additive line (`signOut` also clears recent searches)
+- Customer pages: `DiscoveryPage`, `RestaurantMenu`, `Checkout`, `ConfirmOrderModal`, `CouponSheet`, `LocationConfirmModal`, `OrderStatus`, `CancelOrderModal`, `OrderHistory`, `OrderReview`, `CouponsPage`, `ReferralCard`, `Profile`, `DeleteAccountModal`
+- Shared components: `AddressPickerSheet`, `PromoCarousel`, `CategoryRail`, `FeaturedRail` (renders the new card's `rail` variant), `RestaurantCardSlideshow` (styles), `CouponTicket` (styles), `StarRating` (tokens), `LocationDisclosure` (restyle), `ErrorBoundary` (restyle, contact constant), `PageLoader` (restyle)
+- `src/lib/format.ts`; `vite.config.ts` (drop the Google Fonts runtime caching if D10)
+
+**Retired, once nothing uses them**
+
+- `AppTopBar` (replaced by `AppHeader`)
+- `src/pages/restaurants/RestaurantList.css` (styles move into the components)
+- Duplicated `formatPrice` and `formatDistance` helpers
+- Per-file spinner and fade keyframes
+
+**Not touched:** `src/pages/dashboard/**`; `src/pages/home/**` and the other marketing pages; `src/pages/login-signup/**` and `src/pages/auth/**`; every `src/lib` logic module not named above; `supabase/**`; `android/**`.
+
+---
+
+## 21. Sources (checked 2026-10-05)
+
+- Figma MCP server access and rate limits: <https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/>
+- Figma Code Connect, who can use it: <https://help.figma.com/hc/en-us/articles/23920389749655-Code-Connect>
+- Figma plans and features (Starter file and page limits): <https://help.figma.com/hc/articles/360040328273>
+- Figma MCP skills read from the server: `figma-generate-library`, `figma-design-to-code` (the skill index at `skill://index.json`)
+- Repo facts: the files linked throughout; the baseline build and test runs on `main` @ `76e4a1f`
+
+---
+
+## Appendix A: `tokens.css` draft
+
+```css
+/* src/styles/tokens.css — RedLotus design tokens.
+   Source of truth for code. Mirrored 1:1 by Figma variables whose WEB code
+   syntax is var(--rl-…). Change both together (Appendix B changelog). */
+:root {
+  /* ── Colour · brand ─────────────────────────────────────── */
+  --rl-color-brand-primary: #d63031;
+  --rl-color-brand-pressed: #b71c1c;
+  --rl-color-brand-soft: #fdecea;
+  --rl-color-brand-border: #f5c2c2;
+
+  /* ── Colour · text ──────────────────────────────────────── */
+  --rl-color-text-primary: #1a1a1a;
+  --rl-color-text-secondary: #4a4a4a;
+  --rl-color-text-tertiary: #6f665e;
+  --rl-color-text-disabled: #9a9189;
+  --rl-color-text-on-brand: #ffffff;
+
+  /* ── Colour · surfaces & borders ────────────────────────── */
+  --rl-color-bg-page: #fdf8f6;
+  --rl-color-bg-surface: #ffffff;
+  --rl-color-bg-sunken: #f1ece7;
+  --rl-color-bg-scrim: rgba(26, 26, 26, 0.4);
+  --rl-color-border-default: #e8e2dc;
+  --rl-color-border-subtle: #f0ebe5;
+  --rl-color-border-strong: #8a8178;
+
+  /* ── Colour · status ────────────────────────────────────── */
+  --rl-color-success: #1f7a3a;
+  --rl-color-success-soft: #eafce8;
+  --rl-color-warning: #8a5a00;
+  --rl-color-warning-soft: #fff8ee;
+  --rl-color-warning-border: #f3d68a;
+  --rl-color-danger: #c0392b;
+  --rl-color-danger-soft: #fef2f2;
+  --rl-color-danger-border: #fecaca;
+  --rl-color-neutral-soft: #f5f0ed;
+
+  /* ── Colour · food & ratings ────────────────────────────── */
+  --rl-color-veg: #1f7a3a;
+  --rl-color-nonveg: #8b4513;
+  --rl-color-star: #f5a623;
+
+  /* ── Type ───────────────────────────────────────────────── */
+  --rl-font-sans: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --rl-font-display: "DM Serif Display", Georgia, serif;
+  --rl-font-weight-regular: 400;
+  --rl-font-weight-medium: 500;
+  --rl-font-weight-semibold: 600;
+  --rl-font-weight-bold: 700;
+  --rl-font-size-micro: 11px;   --rl-line-height-micro: 14px;
+  --rl-font-size-caption: 12px; --rl-line-height-caption: 16px;
+  --rl-font-size-body-sm: 13px; --rl-line-height-body-sm: 18px;
+  --rl-font-size-body-md: 14px; --rl-line-height-body-md: 20px;
+  --rl-font-size-body-lg: 16px; --rl-line-height-body-lg: 24px;
+  --rl-font-size-title-sm: 16px; --rl-line-height-title-sm: 22px;
+  --rl-font-size-title-md: 18px; --rl-line-height-title-md: 24px;
+  --rl-font-size-title-lg: 22px; --rl-line-height-title-lg: 28px;
+  --rl-font-size-display: 28px;  --rl-line-height-display: 34px;
+
+  /* ── Space & layout ─────────────────────────────────────── */
+  --rl-space-0-5: 2px;  --rl-space-1: 4px;   --rl-space-2: 8px;
+  --rl-space-3: 12px;   --rl-space-4: 16px;  --rl-space-5: 20px;
+  --rl-space-6: 24px;   --rl-space-8: 32px;  --rl-space-10: 40px;
+  --rl-space-12: 48px;  --rl-space-16: 64px;
+  --rl-gutter: 16px;
+  --rl-content-max: 1200px;
+  --rl-reading-max: 720px;
+  --rl-header-height: 56px;
+  --rl-bottomnav-height: 56px;
+  --rl-cartbar-height: 56px;
+  --rl-sticky-cta-height: 72px;
+  --rl-touch-min: 44px;
+  --rl-touch-nav: 48px;
+
+  /* ── Radius & elevation ─────────────────────────────────── */
+  --rl-radius-xs: 6px;  --rl-radius-sm: 8px;  --rl-radius-md: 12px;
+  --rl-radius-lg: 16px; --rl-radius-xl: 24px; --rl-radius-full: 999px;
+  --rl-shadow-1: 0 1px 2px rgba(26, 26, 26, 0.06), 0 1px 3px rgba(26, 26, 26, 0.04);
+  --rl-shadow-2: 0 4px 12px rgba(26, 26, 26, 0.08);
+  --rl-shadow-3: 0 12px 32px rgba(26, 26, 26, 0.16);
+  --rl-shadow-brand: 0 6px 16px rgba(214, 48, 49, 0.28);
+
+  /* ── Motion ─────────────────────────────────────────────── */
+  --rl-duration-fast: 120ms;
+  --rl-duration-base: 200ms;
+  --rl-duration-slow: 320ms;
+  --rl-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --rl-ease-decelerate: cubic-bezier(0, 0, 0, 1);
+  --rl-ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
+
+  /* ── Layers ─────────────────────────────────────────────── */
+  --rl-z-sticky: 20;
+  --rl-z-cartbar: 30;
+  --rl-z-bottomnav: 40;
+  --rl-z-header: 50;
+  --rl-z-overlay: 100;
+  --rl-z-toast: 200;
+  --rl-z-offline: 300;
+}
+
+@media (min-width: 768px) {
+  :root { --rl-gutter: 24px; }
+}
+@media (min-width: 1024px) {
+  :root { --rl-gutter: 32px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --rl-duration-fast: 0ms;
+    --rl-duration-base: 0ms;
+    --rl-duration-slow: 0ms;
+  }
+}
+```
+
+## Appendix B: Figma registry and token changelog (fill in during the work)
+
+| Item | Value |
+|---|---|
+| Design file | *URL / file key: set in Phase 0* |
+| FigJam file | *URL / file key: set in Phase 0* |
+| Page IDs | Foundations: … · Components: … · Screens: … |
+| Variable collections | Primitives: … · Tokens: … |
+| Key component-set IDs | Button: … · DishRow: … · RestaurantCard: … · BottomNav: … |
+| Run ledger | `.figma/` (git-ignored) |
+
+| Date | Token / component | Change | Code PR / commit |
+|---|---|---|---|
+| | | | |
+
+## Appendix C: Data audit SQL (read-only, run in the SQL Editor)
+
+Sizes the rails, thresholds and layouts with real data before any design work. It reads catalogue tables only; no customer data. Run each query on its own: the editor shows only the last statement's result.
+
+```sql
+-- C1. Restaurants: how many, imagery, ratings, longest strings
+SELECT
+  count(*) FILTER (WHERE is_active)                      AS active,
+  count(*) FILTER (WHERE is_active AND is_open)          AS open_now,
+  count(*) FILTER (WHERE cardinality(image_urls) > 0)    AS with_slideshow,
+  count(*) FILTER (WHERE image_url IS NOT NULL)          AS with_lead_image,
+  count(*) FILTER (WHERE is_featured)                    AS featured,
+  count(*) FILTER (WHERE rating_count >= 5)              AS rated_5_plus,
+  max(length(name))                                      AS longest_name,
+  max(length(cuisine_type))                              AS longest_cuisine,
+  max(length(address))                                   AS longest_address
+FROM public.restaurants;
+
+-- C2. Dishes: imagery, descriptions, ratings, string lengths
+SELECT
+  count(*)                                                        AS available_items,
+  count(*) FILTER (WHERE image_url IS NOT NULL)                   AS with_image,
+  count(*) FILTER (WHERE coalesce(description, '') <> '')         AS with_description,
+  count(*) FILTER (WHERE rating_count >= 3)                       AS rated_3_plus,
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY length(name))       AS median_name_len,
+  max(length(name))                                               AS max_name_len,
+  max(length(description))                                        AS max_desc_len,
+  min(price) AS min_price, max(price) AS max_price
+FROM public.menu_items
+WHERE is_available;
+
+-- C3. Menu size per restaurant (drives the in-menu search / jump-list need)
+SELECT r.name, count(m.id) AS items
+FROM public.restaurants r
+LEFT JOIN public.menu_items m ON m.restaurant_id = r.id AND m.is_available
+WHERE r.is_active
+GROUP BY r.name
+ORDER BY items DESC;
+
+-- C4. Discovery content
+SELECT count(*) AS live_promotions FROM public.promotions
+WHERE active AND (starts_at IS NULL OR now() >= starts_at)
+             AND (ends_at   IS NULL OR now() <  ends_at);
+SELECT slug, label, image_url IS NOT NULL AS has_image
+FROM public.menu_categories WHERE active ORDER BY display_order;
+```
+
+## Appendix D: Completion report template (from the brief)
+
+Fill this in at the end of each wave and keep it in this file.
+
+1. **Screens redesigned**
+2. **Components created or modified**
+3. **Existing functionality preserved:** §15.4 checklist results
+4. **Performance:** the §12.1 table, before and after
+5. **Issues that could not be safely changed**
+6. **Build and test results:** `npm test`, lint, `build`, `build:cap`, device matrix
+7. **Recommended next UI improvements**
